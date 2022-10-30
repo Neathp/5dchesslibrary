@@ -1,35 +1,36 @@
 #pragma once
-#include "chess.hpp"
 #include <string>
+#include <sstream>
 #include <iostream>
+#include "movegen.hpp"
 
-_Compiletime void CharToBit(char ch, int &sq, U64 (&p)[25]) {
+_Compiletime void CharToBit(char ch, int &sq, Piece *b, U64 *p) {
   switch (ch) {
-    case 'p': p[0] |= (1ull << sq); sq += 1; break;
-    case 'w': p[1] |= (1ull << sq); sq += 1; break;
-    case 'n': p[2] |= (1ull << sq); sq += 1; break;
-    case 'b': p[3] |= (1ull << sq); sq += 1; break;
-    case 'r': p[4] |= (1ull << sq); sq += 1; break;
-    case 's': p[5] |= (1ull << sq); sq += 1; break;
-    case 'u': p[6] |= (1ull << sq); sq += 1; break;
-    case 'd': p[7] |= (1ull << sq); sq += 1; break;
-    case 'q': p[8] |= (1ull << sq); sq += 1; break;
-    case 'y': p[9] |= (1ull << sq); sq += 1; break;
-    case 'c': p[10] |= (1ull << sq); sq += 1; break;
-    case 'k': p[11] |= (1ull << sq); sq += 1; break;
-    case 'P': p[12] |= (1ull << sq); sq += 1; break;
-    case 'W': p[13] |= (1ull << sq); sq += 1; break;
-    case 'N': p[14] |= (1ull << sq); sq += 1; break;
-    case 'B': p[15] |= (1ull << sq); sq += 1; break;
-    case 'R': p[16] |= (1ull << sq); sq += 1; break;
-    case 'S': p[17] |= (1ull << sq); sq += 1; break;
-    case 'U': p[18] |= (1ull << sq); sq += 1; break;
-    case 'D': p[19] |= (1ull << sq); sq += 1; break;
-    case 'Q': p[20] |= (1ull << sq); sq += 1; break;
-    case 'Y': p[21] |= (1ull << sq); sq += 1; break;
-    case 'C': p[22] |= (1ull << sq); sq += 1; break;
-    case 'K': p[23] |= (1ull << sq); sq += 1; break;
-    case '*': p[24] |= (1ull << (sq - 1)); break;
+    case 'p': b[sq] = BPawn;      p[BPawn]      |= (1ull << sq); sq += 1; break;
+    case 'w': b[sq] = BBrawn;     p[BBrawn]     |= (1ull << sq); sq += 1; break;
+    case 'n': b[sq] = BKnight;    p[BKnight]    |= (1ull << sq); sq += 1; break;
+    case 'b': b[sq] = BBishop;    p[BBishop]    |= (1ull << sq); sq += 1; break;
+    case 'r': b[sq] = BRook;      p[BRook]      |= (1ull << sq); sq += 1; break;
+    case 's': b[sq] = BPrincess;  p[BPrincess]  |= (1ull << sq); sq += 1; break;
+    case 'u': b[sq] = BUnicorn;   p[BUnicorn]   |= (1ull << sq); sq += 1; break;
+    case 'd': b[sq] = BDragon;    p[BDragon]    |= (1ull << sq); sq += 1; break;
+    case 'q': b[sq] = BQueen;     p[BQueen]     |= (1ull << sq); sq += 1; break;
+    case 'y': b[sq] = BRQueen;    p[BRQueen]    |= (1ull << sq); sq += 1; break;
+    case 'c': b[sq] = BCKing;     p[BCKing]     |= (1ull << sq); sq += 1; break;
+    case 'k': b[sq] = BKing;      p[BKing]      |= (1ull << sq); sq += 1; break;
+    case 'P': b[sq] = WPawn;      p[WPawn]      |= (1ull << sq); sq += 1; break;
+    case 'W': b[sq] = WBrawn;     p[WBrawn]     |= (1ull << sq); sq += 1; break;
+    case 'N': b[sq] = WKnight;    p[WKnight]    |= (1ull << sq); sq += 1; break;
+    case 'B': b[sq] = WBishop;    p[WBishop]    |= (1ull << sq); sq += 1; break;
+    case 'R': b[sq] = WRook;      p[WRook]      |= (1ull << sq); sq += 1; break;
+    case 'S': b[sq] = WPrincess;  p[WPrincess]  |= (1ull << sq); sq += 1; break;
+    case 'U': b[sq] = WUnicorn;   p[WUnicorn]   |= (1ull << sq); sq += 1; break;
+    case 'D': b[sq] = WDragon;    p[WDragon]    |= (1ull << sq); sq += 1; break;
+    case 'Q': b[sq] = WQueen;     p[WQueen]     |= (1ull << sq); sq += 1; break;
+    case 'Y': b[sq] = WRQueen;    p[WRQueen]    |= (1ull << sq); sq += 1; break;
+    case 'C': b[sq] = WCKing;     p[WCKing]     |= (1ull << sq); sq += 1; break;
+    case 'K': b[sq] = WKing;      p[WKing]      |= (1ull << sq); sq += 1; break;
+    case '*': p[UnMoved] |= (1ull << (sq - 1)); break;
     case '/': sq -= 16; break;
     case '1': sq += 1; break;
     case '2': sq += 2; break;
@@ -43,151 +44,174 @@ _Compiletime void CharToBit(char ch, int &sq, U64 (&p)[25]) {
   }
 }
 
-static void importFEN(Chess *chess, const std::string fen) { // assumes valid fen; currently only implemented for a single 8x8 board
-  U64 p[25] = {};
-  int i = 0, j = 0, sq = 56; // start on a8
-  while (fen[i] != ':') {
-    CharToBit(fen[i], sq, p);
-    i++;
+// Assumes valid fen
+template<typename Chess>
+_ForceInline static void importFEN(Chess &chess, std::string fen) {
+  std::istringstream ss(fen);
+  std::string board;
+  while (getline(ss, board, '\n')) {
+    Piece b[64] = 
+      {Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ,
+       Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ,
+       Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ,
+       Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ, Occ};
+    U64 p[28] = {};
+    int i = 0, j = 0, sq = 56; // start on a8
+    while (board[i] != ':') {
+      CharToBit(board[i], sq, b, p);
+      i++;
+    }
+    p[Black] = p[BPawn] | p[BBrawn] | p[BKnight] | p[BBishop] | p[BRook] | p[BPrincess] | p[BUnicorn] | p[BDragon] | p[BQueen] | p[BRQueen] | p[BCKing] | p[BKing];
+    p[White] = p[WPawn] | p[WBrawn] | p[WKnight] | p[WBishop] | p[WRook] | p[WPrincess] | p[WUnicorn] | p[WDragon] | p[WQueen] | p[WRQueen] | p[WCKing] | p[WKing];
+    p[Occ] = p[Black] | p[White];
+    j = board.find_first_of(':', i + 1);
+    const int l = stoi(board.substr(i + 1, j - 1)) + chess.whiteOrigIndex;
+
+    i = j;
+    j = board.find_first_of(':', i + 1);
+    const bool white = (board[j + 1] == 'w');
+    const int t = 2 * stoi(board.substr(i + 1, j - 1)) + (white ? 4 : 5);
+
+    Board brd = Board();
+    memcpy(brd.board, b, sizeof(b));
+    memcpy(brd.bitBoards, p, sizeof(p));
+
+    U64 epTarget = 0;
+    MoveGen::Masks masks;
+    if (white) {
+      ChessFunc::ImportBoard<false>(chess, brd, epTarget, l, t);
+      MoveGen::Refresh<BoardState(0b11111111)>(&chess.turns[l][t], masks);
+    } else {
+      ChessFunc::ImportBoard<true>(chess, brd, epTarget, l, t);
+      MoveGen::Refresh<BoardState(0b01111111)>(&chess.turns[l][t], masks);
+    }
   }
-  j = fen.find_first_of(':', i + 1);
-  const int l = stoi(fen.substr(i + 1, j - 1)) + chess->whiteOrigIndex;
-
-  i = j;
-  j = fen.find_first_of(':', i + 1);
-  const bool white = fen[j + 1] == 'w';
-  const int t = 2 * stoi(fen.substr(i + 1, j - 1)) + (white ? 4 : 5);
-
-  const Board *brd = new Board(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15], p[16], p[17], p[18], p[19], p[20], p[21], p[22], p[23], p[24]);
-  if (white) importBoards<false>(chess, brd, l, t);
-  else importBoards<true>(chess, brd, l, t);
 }
 
-static std::string BitToChar(U64 bit, const Board& brd) {
-  if (bit & brd.BPawn)     return "p";
-  if (bit & brd.BBrawn)    return "w";
-  if (bit & brd.BKnight)   return "n";
-  if (bit & brd.BBishop)   return "b";
-  if (bit & brd.BRook)     return "r";
-  if (bit & brd.BPrincess) return "s";
-  if (bit & brd.BUnicorn)  return "u";
-  if (bit & brd.BDragon)   return "d";
-  if (bit & brd.BQueen)    return "q";
-  if (bit & brd.BRQueen)   return "y";
-  if (bit & brd.BCKing)    return "c";
-  if (bit & brd.BKing)     return "k";
-  if (bit & brd.WPawn)     return "P";
-  if (bit & brd.WBrawn)    return "W";
-  if (bit & brd.WKnight)   return "N";
-  if (bit & brd.WBishop)   return "B";
-  if (bit & brd.WRook)     return "R";
-  if (bit & brd.WPrincess) return "S";
-  if (bit & brd.WUnicorn)  return "U";
-  if (bit & brd.WDragon)   return "D";
-  if (bit & brd.WQueen)    return "Q";
-  if (bit & brd.WRQueen)   return "Y";
-  if (bit & brd.WCKing)    return "C";
-  if (bit & brd.WKing)     return "K";
+static _ForceInline std::string BitToChar(U64 bit, const Board& brd) {
+  if (bit & brd.bitBoards[BPawn])     return "p";
+  if (bit & brd.bitBoards[BBrawn])    return "w";
+  if (bit & brd.bitBoards[BKnight])   return "n";
+  if (bit & brd.bitBoards[BBishop])   return "b";
+  if (bit & brd.bitBoards[BRook])     return "r";
+  if (bit & brd.bitBoards[BPrincess]) return "s";
+  if (bit & brd.bitBoards[BUnicorn])  return "u";
+  if (bit & brd.bitBoards[BDragon])   return "d";
+  if (bit & brd.bitBoards[BQueen])    return "q";
+  if (bit & brd.bitBoards[BRQueen])   return "y";
+  if (bit & brd.bitBoards[BCKing])    return "c";
+  if (bit & brd.bitBoards[BKing])     return "k";
+  if (bit & brd.bitBoards[WPawn])     return "P";
+  if (bit & brd.bitBoards[WBrawn])    return "W";
+  if (bit & brd.bitBoards[WKnight])   return "N";
+  if (bit & brd.bitBoards[WBishop])   return "B";
+  if (bit & brd.bitBoards[WRook])     return "R";
+  if (bit & brd.bitBoards[WPrincess]) return "S";
+  if (bit & brd.bitBoards[WUnicorn])  return "U";
+  if (bit & brd.bitBoards[WDragon])   return "D";
+  if (bit & brd.bitBoards[WQueen])    return "Q";
+  if (bit & brd.bitBoards[WRQueen])   return "Y";
+  if (bit & brd.bitBoards[WCKing])    return "C";
+  if (bit & brd.bitBoards[WKing])     return "K";
   return ".";
 }
 
-static std::string printTimeline(Chess *chess, int l) {
-  Timeline timeline = *chess->timelines[l];
-  int head = timeline.headIndex, tail = timeline.tailIndex;
+template<typename Chess>
+static _ForceInline std::string print(Chess &chess) {
+  int top = chess.whiteOrigIndex + chess.whiteNum, bot = chess.whiteOrigIndex - chess.blackNum;
+  int min = chess.indices[bot].first;
+  for (int i = bot; i < top; i++) min = std::min(min, chess.indices[i].first);
+
   std::string output;
+  for (int i = top; i >= bot; i--) {
+    int head = chess.indices[i].second, tail = chess.indices[i].first;
 
-  for (int i = tail; i <= head; i++) {
-    std::string ltLabel = std::to_string(l - chess->whiteOrigIndex) + "," + std::to_string((i - 4) / 2);
-    output += "╔" + ltLabel;
-    for (int j = ltLabel.length(); j < 8; j++) output += "═";
-    output += "╗";
-  }
-  output += "\n";
+    for (int j = min; j < tail; j++) output += "          ";
 
-  for (int i = 7; i >= 0; i--) {
     for (int j = tail; j <= head; j++) {
-      output += "║";
-      for (int k = 0; k < 8; k++) {
-        output += BitToChar(1ull << (i * 8 + k), *timeline.turns[j]->board);
-      }
-      output += "║";
+      std::string ltLabel = std::to_string(i - chess.whiteOrigIndex) + "," + std::to_string((j - 4) / 2);
+      output += "╔" + ltLabel;
+      for (int k = ltLabel.length(); k < 8; k++) output += "═";
+      output += "╗";
     }
+    output += "\n";
+    
+    for (int j = 7; j >= 0; j--) {
+      for (int k = min; k < tail; k++) output += "          ";
+
+      for (int k = tail; k <= head; k++) {
+        output += "║";
+        for (int l = 0; l < 8; l++) {
+          output += BitToChar(1ull << (j * 8 + l), chess.turns[i][k].board);
+        }
+        output += "║";
+      }
+      output += "\n";
+    }
+
+    for (int j = min; j < tail; j++) output += "          ";
+    for (int j = tail; j <= head; j++) output += "╚════════╝";
     output += "\n";
   }
 
-  for (int i = tail; i <= head; i++) output += "╚════════╝";
-  output += "\n";
-
-  return output;
-}
-
-static std::string printBoard(const Board &brd) {
-  std::string output = "╔════════╗\n";
-  for (int i = 7; i >= 0; i--) {
-    output += "║";
-    for (int k = 0; k < 8; k++) {
-      output += BitToChar(1ull << (i * 8 + k), brd);
-    }
-    output += "║\n";
-  }
-  output += "╚════════╝\n";
   return output;
 }
 
 // Debugging Only
-static U64 dirMaskOr(const DirMask *dirMask) {
-  return (dirMask->center | dirMask->orthN | dirMask->orthE | dirMask->orthS | dirMask->orthW | dirMask->diagNE | dirMask->diagNW | dirMask->diagSE | dirMask->diagSW);
+_Compiletime U64 dirMaskOr(const DirMask *dirMask) {
+  return (dirMask->center | dirMask->north | dirMask->east | dirMask->south | dirMask->west | dirMask->northEast | dirMask->northWest | dirMask->southEast | dirMask->southWest);
 }
 
 // Debugging only
-static std::string printBoardMask(Chess *chess, const int l, const int t) {
-  const BoardMask *mask = chess->timelines[l]->turns[t]->boardMask;
+template<typename Chess>
+static _ForceInline std::string printBoardMask(Chess &chess, const int l, const int t) {
+  const BoardMask *mask = chess.turns[l][t].boardMask;
   std::string output = "";
   output += "pawn: " + std::to_string(mask->pawn) + "\n";
   output += "brawn: " + std::to_string(mask->brawn) + "\n";
   output += "knight: " + std::to_string(mask->knight) + "\n";
   output += "king: " + std::to_string(mask->king) + "\n";
-  output += "orthN: " + std::to_string(dirMaskOr(mask->orthN)) + "\n";
-  output += "orthE: " + std::to_string(dirMaskOr(mask->orthE)) + "\n";
-  output += "orthS: " + std::to_string(dirMaskOr(mask->orthS)) + "\n";
-  output += "diagNE: " + std::to_string(dirMaskOr(mask->diagNE)) + "\n";
-  output += "diagSE: " + std::to_string(dirMaskOr(mask->diagSE)) + "\n";
-  output += "diagSW: " + std::to_string(dirMaskOr(mask->diagSW)) + "\n";
-  output += "diagNW: " + std::to_string(dirMaskOr(mask->diagNW)) + "\n";
+  output += "orthN: " + std::to_string(dirMaskOr(mask->north)) + "\n";
+  output += "orthE: " + std::to_string(dirMaskOr(mask->east)) + "\n";
+  output += "orthS: " + std::to_string(dirMaskOr(mask->south)) + "\n";
+  output += "diagNE: " + std::to_string(dirMaskOr(mask->northEast)) + "\n";
+  output += "diagSE: " + std::to_string(dirMaskOr(mask->southEast)) + "\n";
+  output += "diagSW: " + std::to_string(dirMaskOr(mask->southWest)) + "\n";
+  output += "diagNW: " + std::to_string(dirMaskOr(mask->northWest)) + "\n";
   
   return output;
 }
 
 // Debugging only
-static std::string printBoardMask(const BoardMask *mask) {
+static _ForceInline std::string printBoardMask(const BoardMask *mask) {
   std::string output = "";
   output += "pawn: " + std::to_string(mask->pawn) + "\n";
   output += "brawn: " + std::to_string(mask->brawn) + "\n";
   output += "knight: " + std::to_string(mask->knight) + "\n";
   output += "king: " + std::to_string(mask->king) + "\n";
-  output += "orthN: " + std::to_string(dirMaskOr(mask->orthN)) + "\n";
-  output += "orthE: " + std::to_string(dirMaskOr(mask->orthE)) + "\n";
-  output += "orthS: " + std::to_string(dirMaskOr(mask->orthS)) + "\n";
-  output += "diagNE: " + std::to_string(dirMaskOr(mask->diagNE)) + "\n";
-  output += "diagSE: " + std::to_string(dirMaskOr(mask->diagSE)) + "\n";
-  output += "diagSW: " + std::to_string(dirMaskOr(mask->diagSW)) + "\n";
-  output += "diagNW: " + std::to_string(dirMaskOr(mask->diagNW)) + "\n";
+  output += "orthN: " + std::to_string(dirMaskOr(mask->north)) + "\n";
+  output += "orthE: " + std::to_string(dirMaskOr(mask->east)) + "\n";
+  output += "orthS: " + std::to_string(dirMaskOr(mask->south)) + "\n";
+  output += "diagNE: " + std::to_string(dirMaskOr(mask->northEast)) + "\n";
+  output += "diagSE: " + std::to_string(dirMaskOr(mask->southEast)) + "\n";
+  output += "diagSW: " + std::to_string(dirMaskOr(mask->southWest)) + "\n";
+  output += "diagNW: " + std::to_string(dirMaskOr(mask->northWest)) + "\n";
   
   return output;
 }
 
 // Debugging Only
-static std::string printDirMask(const DirMask *mask) {
+static _ForceInline std::string printDirMask(const DirMask *mask) {
   std::string output = "";
   output += "center: " + std::to_string(mask->center) + "\n";
-  output += "orthN: " + std::to_string(mask->orthN) + "\n";
-  output += "orthE: " + std::to_string(mask->orthE) + "\n";
-  output += "orthS: " + std::to_string(mask->orthS) + "\n";
-  output += "orthW: " + std::to_string(mask->orthW) + "\n";
-  output += "diagNE: " + std::to_string(mask->diagNE) + "\n";
-  output += "diagSE: " + std::to_string(mask->diagSE) + "\n";
-  output += "diagSW: " + std::to_string(mask->diagSW) + "\n";
-  output += "diagNW: " + std::to_string(mask->diagNW) + "\n";
+  output += "orthN: " + std::to_string(mask->north) + "\n";
+  output += "orthE: " + std::to_string(mask->east) + "\n";
+  output += "orthS: " + std::to_string(mask->south) + "\n";
+  output += "orthW: " + std::to_string(mask->west) + "\n";
+  output += "diagNE: " + std::to_string(mask->northEast) + "\n";
+  output += "diagSE: " + std::to_string(mask->southEast) + "\n";
+  output += "diagSW: " + std::to_string(mask->southWest) + "\n";
+  output += "diagNW: " + std::to_string(mask->northWest) + "\n";
   
   return output;
 }

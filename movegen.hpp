@@ -1,848 +1,712 @@
 #pragma once
+#include <vector>
 #include "chess.hpp"
-#include "io.hpp"
 
-namespace Movelist {
-  _Compiletime void CheckBySlider(Turn& turn, U64& checkMask, const U64& sq) {
-    checkMask &= Chess_Lookup::PinBetween[sq];
-    turn.banMask |= Chess_Lookup::CheckBetween[sq];
-  }
+namespace MoveGen {
+  struct Masks {
+    U64 banMask = 0, pinD12 = 0, pinHV = 0, doublePin = 0;
+    U64 checkMasks[65], pinMasks[64];
 
-  template<bool IsWhite>
-  _Compiletime void RegisterPinHV(const Board &brd, const U64 &king, const U64 &enemy, U64 &pinHV) {
-    const U64 pinmask = Chess_Lookup::PinBetween[king * 64 + enemy];
-
-    if (pinmask & Color<IsWhite>(brd)) pinHV |= pinmask;
-  }
+    constexpr Masks() {}
+  };
 
   template<bool IsWhite>
-  _Compiletime void RegisterPinD12(const Board &brd, const U64 &king, const U64 &enemy, U64 &pinD12) {
-    const U64 pinmask = Chess_Lookup::PinBetween[king * 64 + enemy];
+  _Compiletime void RegisterPinEP(const U64 occ, const Board &brd, U64 &epTarget, const U64 eRooks) {
+    const U64 royalty = BoardFunc::Royalty<IsWhite, true>(brd);
+    const U64 pawns = BoardFunc::PieceBB<IsWhite, PawnType>(brd);
 
-    if (pinmask & Color<IsWhite>(brd)) pinD12 |= pinmask;
-  }
-
-  template<bool IsWhite>
-  _Compiletime U64 EPSquare(const U64& epTarget) {
-	  if constexpr (IsWhite) return epTarget << 8;
-	  return epTarget >> 8;
-  }
-
-  template<bool IsWhite>
-  _Compiletime void RegisterPinEP(Turn& turn, const U64& eRooks) {
-    constexpr bool white = IsWhite;
-    const Board brd = *turn.board;
-    const U64 royalty = Royalty<white>(brd), pawns = Pawns<white>(brd), epTarget = turn.epTarget;
-
-    //King is on EP rank and enemy HV walker is on same rank
+    // King is on EP rank and enemy HV walker is on same rank
     const U64 EPRank = 0xffull << ((SquareOf(epTarget) >> 3) << 3); 
     const U64 royaltyEPRank = EPRank & royalty;
     if (royaltyEPRank && (EPRank & eRooks) && (EPRank & pawns)) {
       const U64 royaltysq = SquareOf(royaltyEPRank);
-      const U64 EPLpawn = pawns & ((epTarget & Pawns_NotRight()) >> 1); //Pawn that can EPTake to the left
-      const U64 EPRpawn = pawns & ((epTarget & Pawns_NotLeft()) << 1);  //Pawn that can EPTake to the right
+      const U64 EPLpawn = pawns & ((epTarget & BoardFunc::NotRight()) >> 1); //Pawn that can EPTake to the left
+      const U64 EPRpawn = pawns & ((epTarget & BoardFunc::NotLeft()) << 1);  //Pawn that can EPTake to the right
       if (EPLpawn) {
-        const U64 afterEPocc = (brd.Occ ^ royalty) & ~(epTarget | EPLpawn);
+        const U64 afterEPocc = (occ ^ royalty) & ~(epTarget | EPLpawn);
         if ((Lookup::Rook(royaltysq, afterEPocc) & EPRank) & eRooks) {
-          turn.epTarget = 0;
+          epTarget = 0;
         }
       }
       if (EPRpawn) {
-        const U64 afterEPocc = (brd.Occ ^ royalty) & ~(epTarget | EPRpawn);
+        const U64 afterEPocc = (occ ^ royalty) & ~(epTarget | EPRpawn);
         if ((Lookup::Rook(royaltysq, afterEPocc) & EPRank) & eRooks) {
-          turn.epTarget = 0;
+          epTarget = 0;
         }
       }
     }
   }
 
-  template<bool IsWhite>
-  _Compiletime void Refresh(Turn& turn, U64 &pinD12, U64 &pinHV, U64 &doublePin, U64 (&checkMasks)[65], U64 (&pinsD12)[64], U64 (&pinsHV)[64]) {
-    constexpr bool white = IsWhite, enemy = !IsWhite;
-    const Board brd = *turn.board;
-    const U64 occ = brd.Occ;
+  template<bool IsWhite, bool RQueen>
+  _Compiletime void GenCheckPinMasks(const Board &brd, U64 royalty, const U64 ePL, const U64 ePR, const U64 eKnights, const U64 eBishops, const U64 eRooks, const U64 eKings, U8 &n, Masks &masks) {
+    U64 pins[64];
+    Bitloop (royalty) {
+      const U8 sq = SquareOf(royalty);
+      const U64 bit = 1ull << sq;
+      const U64 offset = sq << 6;
 
-    // Generating banmask.
+      U64 bishopPin = 0, rookPin = 0;
+      // Since double check from leaper pieces cannot happen onto one royal piece, this mask will only ever contain at most one bit set.
+      U64 checkMask = BoardFunc::AttackRight<IsWhite>(ePL & bit) | BoardFunc::AttackLeft<IsWhite>(ePR & bit) | (Lookup::Knight(sq) & eKnights) | (Lookup::King(sq) & eKings);
+      checkMask |= -(checkMask == 0);
+
+      if (Chess_Lookup::RookMask[sq] & eRooks) {
+        U64 atkHV = Lookup::Rook(sq, brd.bitBoards[Occ] ^ BoardFunc::Royalty<IsWhite, RQueen>(brd)) & eRooks;
+        Bitloop(atkHV) {
+          const U64 sq = offset + SquareOf(atkHV);
+          checkMask &= Chess_Lookup::PinBetween[sq];
+          masks.banMask |= Chess_Lookup::CheckBetween[sq];
+        }
+
+        U64 pinnersHV = Lookup::Rook_Xray(sq, brd.bitBoards[Occ]) & eRooks;
+        Bitloop(pinnersHV) {
+          const U64 pin = Chess_Lookup::PinBetween[offset + SquareOf(pinnersHV)];
+          masks.pinMasks[SquareOf(pin & BoardFunc::Color<IsWhite>(brd))] = pin;
+          rookPin |= pin;
+        }
+      }
+
+      if (Chess_Lookup::BishopMask[sq] & eBishops) {
+        U64 atkD12 = Lookup::Bishop(sq, brd.bitBoards[Occ] ^ BoardFunc::Royalty<IsWhite, RQueen>(brd)) & eBishops;
+        Bitloop(atkD12) {
+          const U64 sq = offset + SquareOf(atkD12);
+          checkMask &= Chess_Lookup::PinBetween[sq];
+          masks.banMask |= Chess_Lookup::CheckBetween[sq];
+        }
+
+        U64 pinnersD12 = Lookup::Bishop_Xray(sq, brd.bitBoards[Occ]) & eBishops;
+        Bitloop(pinnersD12) {
+          const U64 pin = Chess_Lookup::PinBetween[offset + SquareOf(pinnersD12)];
+          masks.pinMasks[SquareOf(pin & BoardFunc::Color<IsWhite>(brd))] = pin;
+          bishopPin |= pin;
+        }
+      }
+
+      const U64 pinMask = bishopPin | rookPin;
+      masks.pinD12 |= bishopPin; 
+      masks.pinHV |= rookPin; 
+      pins[n] = pinMask;
+        
+      for (int i = 0; i < n; i++) {
+        masks.checkMasks[i] &= checkMask;
+        masks.doublePin |= pins[i] & pinMask;
+      }
+
+      masks.checkMasks[n + 1] = masks.checkMasks[n] & checkMask;
+      n++;
+    }
+  }
+
+  template<PieceType Type>
+  _Compiletime void enemyAttack(const U64 occ, U64 piece, U64 &banMask) {
+    Bitloop (piece) banMask |= Lookup::PieceMovement<Type>(SquareOf(piece), occ);
+  }
+
+  template<BoardState state>
+  _Compiletime void Refresh(Turn *turn, Masks &masks) {
+    constexpr bool white = state.WhiteMove, enemy = !state.WhiteMove;
+    const Board &brd = turn->board; 
+    const U64 occ = brd.bitBoards[Occ];
 
     // Enemy Pawns/Brawns
-    const U64 ePawns = PawnMovement<enemy>(brd);
-    const U64 ePL = Pawn_AttackLeft<enemy>(ePawns & Pawns_NotLeft()), ePR = Pawn_AttackRight<enemy>(ePawns & Pawns_NotRight());
-    turn.banMask |= ePL | ePR;
+    const U64 ePawns = BoardFunc::PawnMovement<enemy, state.Brawn>(brd);
+    const U64 ePL = BoardFunc::AttackLeft<enemy>(ePawns & BoardFunc::NotLeft()); 
+    const U64 ePR = BoardFunc::AttackRight<enemy>(ePawns & BoardFunc::NotRight());
+    masks.banMask |= ePL | ePR;
 
-    // Enemy Knights
-    const U64 eKnights = Knights<enemy>(brd);
-    {
-      U64 knights = eKnights;
-      Bitloop (knights) {
-        turn.banMask |= Lookup::Knight(SquareOf(knights));
-      }
-    }
-    
-    // Enemy Bishops/Princesses/Queens/RoyalQueens
-    const U64 eBishops = BishopMovement<enemy>(brd);
-    {
-      U64 bishops = eBishops;
-      Bitloop(bishops) {
-        turn.banMask |= Lookup::Bishop(SquareOf(bishops), occ);
-      }
-    }
+    // Could attempt full directional based lookups for these pieces
+    const U64 eKnights = BoardFunc::PieceBB<enemy, KnightType>(brd);
+    const U64 eBishops = BoardFunc::BishopMovement<enemy, state.Bishook, state.Princess, state.RQueen>(brd);
+    const U64 eRooks = BoardFunc::RookMovement<enemy, state.Bishook, state.Princess, state.RQueen>(brd);
+    const U64 eKings = BoardFunc::KingMovement<enemy, state.CKing>(brd);
 
-    // Enemy Rooks/Princesses/Queens/RoyalQueens
-    const U64 eRooks = RookMovement<enemy>(brd);
-    {
-      U64 rooks = eRooks;
-      Bitloop(rooks) {
-        turn.banMask |= Lookup::Rook(SquareOf(rooks), occ);
-      }
-    }
-  
-    // Enemy Kings
-    const U64 eKings = KingMovement<enemy>(brd);
-    {
-      U64 kings = eKings;
-      Bitloop (kings) {
-        turn.banMask |= Lookup::King(SquareOf(kings));
-      }
-    }
+    enemyAttack<KnightType>(occ, eKnights, masks.banMask);
+    enemyAttack<BishopType>(occ, eBishops, masks.banMask);
+    enemyAttack<RookType>(occ, eRooks, masks.banMask);
+    enemyAttack<KingType>(occ, eKings, masks.banMask);
 
-    // Generating pinmasks and checkmasks.
-    int n = 0;
+    // Removing EP if necessary
+    if (turn->epTarget) RegisterPinEP<white>(occ, brd, turn->epTarget, eRooks);
 
-    // RoyalQueens
-    {
-      U64 royalQueens = RoyalQueens<white>(brd);
-      Bitloop (royalQueens) {
-        const U64 royalqueensq = SquareOf(royalQueens);
-        const U64 royalqueenbit = 1ull << royalqueensq;
+    // Generating pinmasks and checkmasks
+    U8 n = 0;
+    if constexpr (state.RQueen) GenCheckPinMasks<white, true>(brd, BoardFunc::PieceBB<white, RQueenType>(brd), ePL, ePR, eKnights, eBishops, eRooks, eKings, n, masks);
+    GenCheckPinMasks<white, state.RQueen>(brd, BoardFunc::PieceBB<white, KingType>(brd), ePL, ePR, eKnights, eBishops, eRooks, eKings, n, masks);
 
-        U64 bishopPin = 0, rookPin = 0;
-        // Since double check from leaper pieces cannot happen onto one royal queen, this mask will only ever contain at most one bit set.
-        U64 checkMask = Pawn_AttackRight<white>(ePL & royalqueenbit) | Pawn_AttackLeft<white>(ePR & royalqueenbit) | (Lookup::Knight(royalqueensq) & eKnights) | (Lookup::King(royalqueensq) & eKings);
-        checkMask |= -(checkMask == 0);
-
-        if (Chess_Lookup::RookMask[royalqueensq] & eRooks) {
-          U64 atkHV = Lookup::Rook(royalqueensq, occ ^ Royalty<white>(brd)) & eRooks;
-          Bitloop(atkHV) {
-            CheckBySlider(turn, checkMask, (royalqueensq << 6) + SquareOf(atkHV));
-          }
-
-          U64 pinnersHV = Lookup::Rook_Xray(royalqueensq, occ) & eRooks;
-          Bitloop(pinnersHV) {
-            RegisterPinHV<white>(brd, royalqueensq, SquareOf(pinnersHV), rookPin);
-          }
-        }
-
-        if (Chess_Lookup::BishopMask[royalqueensq] & eBishops) {
-          U64 atkD12 = Lookup::Bishop(royalqueensq, occ ^ Royalty<white>(brd)) & eBishops;
-          Bitloop(atkD12) {
-            CheckBySlider(turn, checkMask, (royalqueensq << 6) + SquareOf(atkD12));
-          }
-
-          U64 pinnersD12 = Lookup::Bishop_Xray(royalqueensq, occ) & eBishops;
-          Bitloop(pinnersD12) {
-            RegisterPinD12<white>(brd, royalqueensq, SquareOf(pinnersD12), bishopPin);
-          }
-        }
-        
-        for (int i = 0; i < n; i++) {
-          checkMasks[i] &= checkMask;
-          doublePin |= (bishopPin | rookPin) & (pinsD12[i] | pinsHV[i]);
-        }
-        pinD12 |= bishopPin; pinHV |= rookPin;
-        pinsD12[n] = bishopPin; pinsHV[n] = rookPin;
-        checkMasks[n + 1] = checkMasks[n] & checkMask;
-        n++;
-      }
-    }
-
-    // Kings
-    {
-      U64 kings = Kings<white>(brd);
-      Bitloop (kings) {
-        const U64 kingsq = SquareOf(kings);
-        const U64 kingbit = 1ull << kingsq;
-
-        U64 bishopPin = 0, rookPin = 0;
-        // Since double check from leaper pieces cannot happen onto one king, this mask will only ever contain at most one bit set.
-        U64 checkMask = Pawn_AttackRight<white>(ePL & kingbit) | Pawn_AttackLeft<white>(ePR & kingbit) | (Lookup::Knight(kingsq) & eKnights) | (Lookup::King(kingsq) & eKings);
-        checkMask |= -(checkMask == 0);
-
-        if (Chess_Lookup::RookMask[kingsq] & eRooks) {
-          U64 atkHV = Lookup::Rook(kingsq, occ ^ Royalty<white>(brd)) & eRooks;
-          Bitloop(atkHV) {
-            CheckBySlider(turn, checkMask, (kingsq << 6) + SquareOf(atkHV));
-          }
-
-          U64 pinnersHV = Lookup::Rook_Xray(kingsq, occ) & eRooks;
-          Bitloop(pinnersHV) {
-            RegisterPinHV<white>(brd, kingsq, SquareOf(pinnersHV), rookPin);
-          }
-        }
-
-        if (Chess_Lookup::BishopMask[kingsq] & eBishops) {
-          U64 atkD12 = Lookup::Bishop(kingsq, occ ^ Royalty<white>(brd)) & eBishops;
-          Bitloop(atkD12) {
-            CheckBySlider(turn, checkMask, (kingsq << 6) + SquareOf(atkD12));
-          }
-
-          U64 pinnersD12 = Lookup::Bishop_Xray(kingsq, occ) & eBishops;
-          Bitloop(pinnersD12) {
-            RegisterPinD12<white>(brd, kingsq, SquareOf(pinnersD12), bishopPin);
-          }
-        }
-            
-        for (int i = 0; i < n; i++) {
-          checkMasks[i] &= checkMask;
-          doublePin |= (bishopPin | rookPin) & (pinsD12[i] | pinsHV[i]);
-        }
-        pinD12 |= bishopPin; pinHV |= rookPin;
-        pinsD12[n] = bishopPin; pinsHV[n] = rookPin;
-        checkMasks[n + 1] = checkMasks[n] & checkMask;
-        n++;
-      }
-    }
-
-    if (turn.epTarget) {
-      RegisterPinEP<white>(turn, eRooks);
-    }
-
-    turn.checkMask = checkMasks[n];
+    turn->checkMask = masks.checkMasks[n];
+    turn->banMask = masks.banMask;
   }
 
   template<bool IsWhite>
-  _Compiletime void Pawn_PruneLeft(U64& pawn, const U64 &pinD12, const U64 (&pinsD12)[64], const int &n) {
-    const U64 unpinned = pawn & ~pinD12;
-    U64 pinned = 0;
-    for (int i = 0; i < n; i++) pinned |= pawn & pinsD12[i] & Pawn_InvertLeft<IsWhite>(pinsD12[i] & Pawns_NotRight());
+  _Compiletime void PawnPrune(U64 &pF, U64 &pP, U64 &pL, U64 &pR, const U64 pinHV, const U64 pinD12, const U64 *pinMasks) {
+    // Forwards pinned pawns
+    U64 pinnedF = pF & pinHV;
+    pF ^= pinnedF;
+    Bitloop (pinnedF) {
+      const U64 sq = SquareOf(pinnedF);
+      pF |= (1ull << sq) & BoardFunc::Forward<IsWhite>(pinMasks[sq]);
+    }
 
-    pawn = (pinned | unpinned);
+    // Forwards2 pinned pawns
+    U64 pinnedP = pP & pinHV;
+    pP ^= pinnedP;
+    Bitloop (pinnedP) {
+      const U64 sq = SquareOf(pinnedP);
+      pP |= (1ull << sq) & BoardFunc::Forward2<IsWhite>(pinMasks[sq]);
+    }
+
+    // Left pinned pawns
+    U64 pinnedL = pL & pinD12;
+    pL ^= pinnedL;
+    Bitloop (pinnedL) {
+      const U64 sq = SquareOf(pinnedL);
+      pL |= (1ull << sq) & BoardFunc::AttackRight<IsWhite>(pinMasks[sq]);
+    }
+
+    // Right pinned pawns
+    U64 pinnedR = pR & pinD12;
+    pR ^= pinnedR;
+    Bitloop (pinnedR) {
+      const U64 sq = SquareOf(pinnedR);
+      pR |= (1ull << sq) & BoardFunc::AttackLeft<IsWhite>(pinMasks[sq]);
+    }
   }
 
   template<bool IsWhite>
-  _Compiletime void Pawn_PruneRight(U64& pawn, const U64 &pinD12, const U64 (&pinsD12)[64], const int &n) {
-    const U64 unpinned= pawn & ~pinD12;
-    U64 pinned = 0;
-    for (int i = 0; i < n; i++) pinned |= pawn & pinsD12[i] & Pawn_InvertRight<IsWhite>(pinsD12[i] & Pawns_NotLeft());
+  _Compiletime void PawnPruneEP(U64 &epL, U64 &epR, const U64 pinD12, const U64 pinMasks[64]) {
+    U64 pinnedL = epL & pinD12;
+    epL ^= pinnedL;
+    Bitloop (pinnedL) {
+      const U64 sq = SquareOf(pinnedL);
+      epL |= (1ull << sq) & BoardFunc::AttackRight<IsWhite>(pinMasks[sq]);
+    }
 
-    pawn = (pinned | unpinned);
+    U64 pinnedR = epR & pinD12;
+    epR ^= pinnedR;
+    Bitloop (pinnedR) {
+      const U64 sq = SquareOf(pinnedR);
+      epR |= (1ull << sq) & BoardFunc::AttackLeft<IsWhite>(pinMasks[sq]);
+    }
   }
 
-  template<bool IsWhite>
-  _Compiletime void Pawn_PruneLeftEP(U64& pawn, const U64 &pinD12, const U64 (&pinsD12)[64], const int &n) {
-    const U64 unpinned = pawn & ~pinD12;
-    U64 pinned = 0; 
-    for (int i = 0; i < n; i++) pinned |= pawn & pinsD12[i] & Pawn_InvertLeft<IsWhite>(pinsD12[i] & Pawns_NotRight());
+  template<bool IsWhite, bool MultPieces, bool Royalty, bool NonPawn>
+  _Compiletime void timelineMoves(Turn* turn, const U8 sq, const U8 l, const U8 t, const U8 toL, const U8 toT, const U64 moveSet, std::vector<Move>& moves) {
+    if (!turn->valid) return;
+    const U64 move = (Royalty) ? moveSet & BoardFunc::EnemyOrEmpty<IsWhite>(turn->board) & turn->checkMask & ~turn->banMask 
+                   : (NonPawn) ? moveSet & BoardFunc::EnemyOrEmpty<IsWhite>(turn->board) & turn->checkMask
+                               : moveSet & BoardFunc::Color<!IsWhite>(turn->board) & turn->checkMask;
 
-    pawn = (pinned | unpinned);
-  }
+    U64 cap = move & turn->board.bitBoards[Occ];
+    Bitloop(cap) {
+      const U8 tosq = SquareOf(cap);
+      //if constexpr (MultPieces) moves.push_back(Move(tosq, tosq, 0, 0, 8, l, t, toL, toT));
+      //else moves.push_back(Move(sq, tosq, 0, 0, 8, l, t, toL, toT));
+    }
 
-  template<bool IsWhite>
-  _Compiletime void Pawn_PruneRightEP(U64& pawn, const U64 &pinD12, const U64 (&pinsD12)[64], const int &n) {
-    const U64 unpinned = pawn & ~pinD12;
-    U64 pinned = 0;
-    for (int i = 0; i < n; i++) pinned |= pawn & pinsD12[i] & Pawn_InvertRight<IsWhite>(pinsD12[i] & Pawns_NotLeft());
-
-    pawn = (pinned | unpinned); 
-  }
-
-  template<bool IsWhite>
-  _Compiletime void Pawn_PruneMove(U64& pawn, const U64 &pinHV, const U64 (&pinsHV)[64], const int &n) {
-    const U64 unpinned = pawn & ~pinHV;
-    U64 pinned = 0;
-    for (int i = 0; i < n; i++) pinned |= pawn & pinsHV[i] & Pawn_Backward<IsWhite>(pinsHV[i]);
-
-    pawn = (unpinned | pinned);
-  }
-
-  template<bool IsWhite>
-  _Compiletime void Pawn_PruneMove2(U64& pawn, const U64 &pinHV, const U64 (&pinsHV)[64], const int &n) {
-    const U64 unpinned = pawn & ~pinHV;
-    U64 pinned = 0;
-    for (int i = 0; i < n; i++) pinned |= pawn & pinsHV[i] & Pawn_Backward2<IsWhite>(pinsHV[i]);
-    
-
-    pawn = (unpinned | pinned);
-  }
-
-  template<bool IsWhite, class Callback_Move>
-  _Compiletime void _enumerate(Turn &turn, const U64 &pinD12, const U64 &pinHV, const U64 &doublePin, const U64 &checkMask, const U64 &pastMask, 
-    const U64 (&checkMasks)[65], const U64 (&pinsD12)[64], const U64 (&pinsHV)[64], std::vector<Move> &moves) {
-
-    constexpr bool white = IsWhite, enemy = !IsWhite;
-
-    const Board brd = *turn.board;
-
-    const U64 kingban = turn.banMask, epTarget = turn.epTarget;
-    const U64 movableSquare = EnemyOrEmpty<white>(brd) & checkMask;
-
-    // Royalty moves
-    int n = 0;
-    {
-      const U64 movable = EnemyOrEmpty<white>(brd) & ~turn.banMask & pastMask;
-      // Royal Queen moves
-      {
-        U64 royalQueens = RoyalQueens<white>(brd);
-        Bitloop (royalQueens) {
-          const U64 sq = SquareOf(royalQueens);
-          U64 move = Lookup::Queen(sq, brd.Occ) & movable & checkMasks[n];
-          while (move) {
-            Callback_Move::template RoyalQueenmove<white>(brd, 1ull << sq, PopBit(move), moves);
-          }
-          n++;
-        }
+    if constexpr (NonPawn) {
+      U64 nocap = move ^ cap;
+      Bitloop(nocap) {
+        const U8 tosq = SquareOf(nocap);
+        //if constexpr (MultPieces); moves.push_back(Move(tosq, tosq, 0, 0, 7, l, t, toL, toT));
+        //else moves.push_back(Move(sq, tosq, 0, 0, 7, l, t, toL, toT));
       }
-      
-      // King moves
-      {
-        U64 kings = Kings<white>(brd);
-        Bitloop (kings) {
-          const U64 sq = SquareOf(kings);
-          U64 move = Lookup::King(sq) & movable & checkMasks[n];
-          while (move) {
-            Callback_Move::template Kingmove<white>(brd, 1ull << sq, PopBit(move), moves);
-          }
-          n++;
-        }
+    }
+  }
 
-        // Castling
-        if (checkMask == 0xffffffffffffffffull) {
-          kings = Kings<white>(brd) & brd.UnMoved;
-          while(kings) {
-            const U64 king = PopBit(kings), sq = SquareOf(king), rank = 0xffull << ((sq >> 3) << 3);
-            const U64 qKing = (king >> 2) & rank, kKing = (king << 2) & rank;
+  template<bool IsWhite, bool Infinite, bool OnlyInfinite, PieceType Type, Direction Dir, int16_t T>
+  inline constexpr static U64 buildRingMoves(Turn *turn, const U8 l, const U8 t, const int8_t dist, const U8 sq, U64 tempOcc, std::vector<Move>& moves) {
+    constexpr PieceType movementType = (Type == RQueenType) ? QueenType : Type;
 
-            const U64 kingLow = king - 1;
-            const U64 rooks = Rooks<white>(brd) & brd.UnMoved & rank, legal = rank & ~kingban, empty = brd.Occ ^ rooks;
+    turn += (Dir == North)     ? T      : (Dir == West)      ? -1     : (Dir == South)     ? -T    : (Dir == NorthEast) ? T + 2 
+          : (Dir == SouthEast) ? -T - 2 : (Dir == SouthWest) ? -T + 2 : (Dir == NorthWest) ? T - 2                      : 1;
 
-            // Queenside Castling
-            const U64 qRook = rooks & (1ull << (63 - __builtin_clzll((kingLow & rooks) | 1ull))), qLegal = king - qKing;
-            if (qRook && ((qLegal & legal) == qLegal) && (((king - qRook) & empty) == 0)) {
-              Callback_Move::template KingCastle<white>(brd, (king | qKing), (qRook | king >> 1), moves);
-            }
+    if (turn->valid == false) return Lookup::PieceMovement<movementType>(sq, tempOcc);
 
-            // Kingside Castling
-            const U64 kRook = _blsi_u64(~kingLow & rooks), kLegal = (kKing - king) << 1;
-            if (kRook && ((kLegal & legal) == kLegal) && ((((kRook - king) << 1) & empty) == 0)) {
-              Callback_Move::template KingCastle<white>(brd, (king | kKing), (kRook | king << 1), moves);
-            }
-          }
-        }
+    const U8 toL = (Dir == North)     ? l + dist : (Dir == West)      ? l        : (Dir == South)     ? l - dist : (Dir == NorthEast) ? l + dist 
+                 : (Dir == SouthEast) ? l - dist : (Dir == SouthWest) ? l - dist : (Dir == NorthWest) ? l + dist                      : l;
+    const U8 toT = (Dir == North)     ? t             : (Dir == West)      ? t - 1         : (Dir == South)     ? t : (Dir == NorthEast) ? t + dist << 1 
+                 : (Dir == SouthEast) ? t + dist << 1 : (Dir == SouthWest) ? t - dist << 1 : (Dir == NorthWest) ? t - dist << 1          : t + 1;
+    const U64 bit = 1ull << sq;
+    const U64 occ = turn->board.bitBoards[Occ];
+    const U64 movable = (Type == RQueenType) ? turn->checkMask & BoardFunc::EnemyOrEmpty<IsWhite>(turn->board) & ~turn->banMask 
+                                             : turn->checkMask & BoardFunc::EnemyOrEmpty<IsWhite>(turn->board);
+
+    const bool blocked = bit & occ;
+    if constexpr (Infinite) {
+      if (blocked) {
+        if (bit & movable); //moves.push_back(Move(sq, sq, 0, 0, 8, l, t, toL, toT));
+        if constexpr (OnlyInfinite) return Lookup::PieceMovement<movementType>(sq, tempOcc);
+      } else {
+        if (Type != RQueenType || (bit & movable)); //moves.push_back(Move(sq, sq, 0, 0, 7, l, t, toL, toT));
+        if constexpr (OnlyInfinite) return buildRingMoves<IsWhite, true, true, Type, Dir, T>(turn, l, t, dist + 1, sq, tempOcc, moves);
+      }
+    }
+
+    if (dist < 8) {
+      const U64 ring = Lookup::Donut(dist, sq);
+      tempOcc |= ring & occ;
+
+      const U64 move = (blocked) ? buildRingMoves<IsWhite, false, false, Type, Dir, T>(turn, l, t, dist + 1, sq, tempOcc, moves)
+                                 : buildRingMoves<IsWhite, Infinite, false, Type, Dir, T>(turn, l, t, dist + 1, sq, tempOcc, moves);
+              
+      const U64 moveSlice = ring & move & movable;
+      U64 cap = moveSlice & occ;
+      U64 nocap = moveSlice ^ cap;
+      Bitloop(cap); //moves.emplace_back(sq, SquareOf(cap), 0, 0, 8, l, t, toL, toT);
+      Bitloop(nocap); //moves.emplace_back(sq, SquareOf(nocap), 0, 0, 7, l, t, toL, toT);
+
+      return move;
+    } else {
+      return (Infinite) ? buildRingMoves<IsWhite, Infinite, true, Type, Dir, T>(turn, l, t, dist + 1, sq, tempOcc, moves) : Lookup::PieceMovement<movementType>(sq, tempOcc);
+    }
+  }
+
+  template<bool IsWhite, PieceType Type, U8 T>
+  _Compiletime void royaltyPiece(Turn *turn, const U64 occ, U64 piece, const U64 movableSquare, const U64 *checkMasks, U8 &n, const int l, const int t, std::vector<Move> &moves) {
+    Bitloop(piece) {
+      const U64 sq = SquareOf(piece);
+      const U64 move = Lookup::PieceMovement<Type>(sq, occ) & movableSquare & checkMasks[n];
+      U64 cap = move & occ;
+      U64 nocap = move ^ cap;
+      Bitloop(cap) moves.emplace_back(sq, SquareOf(cap), 0, 0, 1, l, t, l, t);
+      Bitloop(nocap) moves.emplace_back(sq, SquareOf(nocap), 0, 0, 0, l, t, l, t);
+
+      //if (checkMasks[n] == 0xffffffffffffffffull) {
+      //  if constexpr (Type == RQueenType) {
+      //    buildRingMoves<IsWhite, true, false, RQueenType, North, T>(turn, l, t, 0, sq, 0, moves);
+      //    buildRingMoves<IsWhite, true, false, RQueenType, West,  T>(turn, l, t, 0, sq, 0, moves);
+      //    buildRingMoves<IsWhite, true, false, RQueenType, South, T>(turn, l, t, 0, sq, 0, moves);
+      //    buildRingMoves<IsWhite, true, false, RQueenType, NorthEast, T>(turn, l, t, 0, sq, 0, moves);
+      //    buildRingMoves<IsWhite, true, false, RQueenType, SouthEast, T>(turn, l, t, 0, sq, 0, moves);
+      //    buildRingMoves<IsWhite, true, false, RQueenType, SouthWest, T>(turn, l, t, 0, sq, 0, moves);
+      //    buildRingMoves<IsWhite, true, false, RQueenType, NorthWest, T>(turn, l, t, 0, sq, 0, moves);
+      //  }
+      //  if constexpr (Type == KingType) {
+      //    const U64 move = Lookup::King(sq) | 1ull << sq;
+      //    timelineMoves<IsWhite, false, true, true>(turn + T, sq, l, t, l + 1, t, move, moves);
+      //    timelineMoves<IsWhite, false, true, true>(turn - 1, sq, l, t, l, t - 1, move, moves);
+      //    timelineMoves<IsWhite, false, true, true>(turn - T, sq, l, t, l - 1, t, move, moves);
+      //    timelineMoves<IsWhite, false, true, true>(turn + T + 2, sq, l, t, l + 1, t + 2, move, moves);
+      //    timelineMoves<IsWhite, false, true, true>(turn - T + 2, sq, l, t, l - 1, t + 2, move, moves);
+      //    timelineMoves<IsWhite, false, true, true>(turn - T - 2, sq, l, t, l - 1, t - 2, move, moves);
+      //    timelineMoves<IsWhite, false, true, true>(turn + T - 2, sq, l, t, l + 1, t - 2, move, moves);
+      //  }
+      //}
+      n++;
+    }
+  }
+
+  template<bool IsWhite, PieceType Type, U8 T>
+  _Compiletime void pinnablePiece(Turn *turn, const U64 occ, const U64 piece, const U64 pins, const U64 movableSquare, const U64 *pinMasks, const int l, const int t, std::vector<Move> &moves) {
+    U64 pinPieces = piece & pins;
+    U64 nopinPieces = piece ^ pinPieces;
+    Bitloop(pinPieces) {
+      const U64 sq = SquareOf(pinPieces);
+      const U64 move = Lookup::PieceMovement<Type>(sq, occ) & movableSquare & pinMasks[sq];
+      U64 cap = move & occ;
+      U64 nocap = move ^ cap;
+      Bitloop(cap) moves.emplace_back(sq, SquareOf(cap), 0, 0, 1, l, t, l, t);
+      Bitloop(nocap) moves.emplace_back(sq, SquareOf(nocap), 0, 0, 0, l, t, l, t);
+    }
+    Bitloop(nopinPieces) {
+      const U64 sq = SquareOf(nopinPieces);
+      const U64 move = Lookup::PieceMovement<Type>(sq, occ) & movableSquare;
+      U64 cap = move & occ;
+      U64 nocap = move ^ cap;
+      Bitloop(cap) moves.emplace_back(sq, SquareOf(cap), 0, 0, 1, l, t, l, t);
+      Bitloop(nocap) moves.emplace_back(sq, SquareOf(nocap), 0, 0, 0, l, t, l, t);
+
+      //if constexpr (Type == BishopType) {
+      //  buildRingMoves<IsWhite, false, false, RookType, North, T>(turn, l, t, 0, sq, 0, moves);
+      //  buildRingMoves<IsWhite, false, false, RookType, West,  T>(turn, l, t, 0, sq, 0, moves);
+      //  buildRingMoves<IsWhite, false, false, RookType, South, T>(turn, l, t, 0, sq, 0, moves);
+      //  buildRingMoves<IsWhite, true, true, NoType, NorthEast, T>(turn, l, t, 0, sq, 0, moves);
+      //  buildRingMoves<IsWhite, true, true, NoType, SouthEast, T>(turn, l, t, 0, sq, 0, moves);
+      //  buildRingMoves<IsWhite, true, true, NoType, SouthWest, T>(turn, l, t, 0, sq, 0, moves);
+      //  buildRingMoves<IsWhite, true, true, NoType, NorthWest, T>(turn, l, t, 0, sq, 0, moves);
+      //}
+      //if constexpr (Type == RookType) {
+      //  buildRingMoves<IsWhite, true, true, RookType, North, T>(turn, l, t, 0, sq, 0, moves);
+      //  buildRingMoves<IsWhite, true, true, RookType, West,  T>(turn, l, t, 0, sq, 0, moves);
+      //  buildRingMoves<IsWhite, true, true, RookType, South, T>(turn, l, t, 0, sq, 0, moves);
+      //}
+      //if constexpr (Type == PrincessType) {
+      //  buildRingMoves<IsWhite, true, false, PrincessType, North, T>(turn, l, t, 0, sq, 0, moves);
+      //  buildRingMoves<IsWhite, true, false, PrincessType, West,  T>(turn, l, t, 0, sq, 0, moves);
+      //  buildRingMoves<IsWhite, true, false, PrincessType, South, T>(turn, l, t, 0, sq, 0, moves);
+      //  buildRingMoves<IsWhite, true, true, PrincessType, NorthEast, T>(turn, l, t, 0, sq, 0, moves);
+      //  buildRingMoves<IsWhite, true, true, PrincessType, SouthEast, T>(turn, l, t, 0, sq, 0, moves);
+      //  buildRingMoves<IsWhite, true, true, PrincessType, SouthWest, T>(turn, l, t, 0, sq, 0, moves);
+      //  buildRingMoves<IsWhite, true, true, PrincessType, NorthWest, T>(turn, l, t, 0, sq, 0, moves);
+      //}
+      //if constexpr (Type == QueenType) {
+      //  buildRingMoves<IsWhite, true, false, QueenType, North, T>(turn, l, t, 0, sq, 0, moves);
+      //  buildRingMoves<IsWhite, true, false, QueenType, West,  T>(turn, l, t, 0, sq, 0, moves);
+      //  buildRingMoves<IsWhite, true, false, QueenType, South, T>(turn, l, t, 0, sq, 0, moves);
+      //  buildRingMoves<IsWhite, true, false, QueenType, NorthEast, T>(turn, l, t, 0, sq, 0, moves);
+      //  buildRingMoves<IsWhite, true, false, QueenType, SouthEast, T>(turn, l, t, 0, sq, 0, moves);
+      //  buildRingMoves<IsWhite, true, false, QueenType, SouthWest, T>(turn, l, t, 0, sq, 0, moves);
+      //  buildRingMoves<IsWhite, true, false, QueenType, NorthWest, T>(turn, l, t, 0, sq, 0, moves);
+      //}
+      //if constexpr (Type == CKingType) {
+      //  const U64 move = Lookup::King(sq) | 1ull << sq;
+      //  timelineMoves<IsWhite, false, false, true>(turn + T, sq, l, t, l + 1, t, move, moves);
+      //  timelineMoves<IsWhite, false, false, true>(turn - 1, sq, l, t, l, t - 1, move, moves);
+      //  timelineMoves<IsWhite, false, false, true>(turn - T, sq, l, t, l - 1, t, move, moves);
+      //  timelineMoves<IsWhite, false, false, true>(turn + T + 2, sq, l, t, l + 1, t + 2, move, moves);
+      //  timelineMoves<IsWhite, false, false, true>(turn - T + 2, sq, l, t, l - 1, t + 2, move, moves);
+      //  timelineMoves<IsWhite, false, false, true>(turn - T - 2, sq, l, t, l - 1, t - 2, move, moves);
+      //  timelineMoves<IsWhite, false, false, true>(turn + T - 2, sq, l, t, l + 1, t - 2, move, moves);
+      //}
+    }
+  }
+
+  template<BoardState state, U16 T>
+  _Compiletime void _enumerate(Turn *turn, const U64 epTarget, const U64 checkMask, const U64 pastMask, const Masks &masks, const int l, const int t, std::vector<Move> &moves) {
+    constexpr bool white = state.WhiteMove, enemy = !state.WhiteMove;
+    constexpr U16 T2 = T << 1;
+    const Board &brd = turn->board;
+    const U64 occ = brd.bitBoards[Occ];
+    const U64 pins = masks.pinD12 | masks.pinHV; 
+    const U64 notPinD12 = ~masks.pinD12;
+    const U64 notPinHV = ~masks.pinHV;
+    const U64 notDoublePin = ~masks.doublePin;
+
+    const U64 enemyOrEmpty = BoardFunc::EnemyOrEmpty<white>(brd);
+    const U64 movable = enemyOrEmpty & checkMask;
+    const U64 royalMovable = enemyOrEmpty & ~masks.banMask & pastMask;
+
+    U8 n = 0;
+    // Royal Queen moves
+    if constexpr (state.RQueen) royaltyPiece<white, QueenType, T>(turn, occ, BoardFunc::PieceBB<white, RQueenType>(brd), royalMovable, masks.checkMasks, n, l, t, moves);
+
+    // King moves
+    royaltyPiece<white, KingType, T>(turn, occ, BoardFunc::PieceBB<white, KingType>(brd), royalMovable, masks.checkMasks, n, l, t, moves);
+
+    // Castling
+    if (checkMask == 0xffffffffffffffffull) {
+      U64 kings = BoardFunc::PieceBB<white, KingType>(brd) & brd.bitBoards[UnMoved];
+      Bitloop(kings) {
+        const U64 sq = SquareOf(kings);
+        const U64 bit = 1ull << sq;
+        const U64 rank = 0xffull << ((sq >> 3) << 3);
+
+        const U64 kingLow = bit - 1;
+        const U64 rooks = BoardFunc::PieceBB<white, RookType>(brd) & brd.bitBoards[UnMoved] & rank;
+        const U64 legal = rank & ~masks.banMask;
+        const U64 empty = occ ^ rooks;
+
+        const U64 qKing = (bit >> 2) & rank;
+        const U64 qRook = rooks & (1ull << (63 - __builtin_clzll((kingLow & rooks) | 1ull)));
+        const U64 qLegal = bit - qKing;
+
+        if (qRook && (((bit - qRook) & empty) == 0) && ((qLegal & legal) == qLegal)) moves.emplace_back(sq, sq - 2, SquareOf(qRook), sq - 1, Castle, l, t, l, t);
+
+        const U64 kKing = (bit << 2) & rank;
+        const U64 kRook = _blsi_u64(~kingLow & rooks);
+        const U64 kLegal = (kKing - bit) << 1;
+
+        if (kRook && ((((kRook - bit) << 1) & empty) == 0) && ((kLegal & legal) == kLegal)) moves.emplace_back(sq, sq + 2, SquareOf(kRook), sq + 1, Castle, l, t, l, t);
       }
     }
 
     // Pawn/Brawn moves
-    {
-      const U64 pawns = Pawns<white>(brd) & ~doublePin, brawns = Brawns<white>(brd), pMovement = pawns | brawns;
-      const U64 pMovementLR = pMovement & ~pinHV, pMovementHV = pMovement & ~pinD12;
-      const U64 empty = Empty(brd), capturableEnemy = Color<enemy>(brd) & checkMask;
+    const U64 pawns = BoardFunc::PieceBB<white, PawnType>(brd);
+    const U64 brawns = BoardFunc::PieceBB<white, BrawnType>(brd);
+    const U64 pMove = (pawns | brawns) & notDoublePin;
+    const U64 pMoveLR = pMove & notPinHV;
+    const U64 pMoveHV = pMove & notPinD12;
 
-      //These 4 are basic pawn moves
-      U64 fPMovement = pMovementHV & Pawn_Backward<white>(empty);	
-      U64 pPMovement = fPMovement & brd.UnMoved & Pawn_Backward2<white>(empty & checkMask);  
-      U64 lPMovement = pMovementLR & Pawn_InvertLeft<white>(capturableEnemy & Pawns_NotRight());
-      U64 rPMovement = pMovementLR & Pawn_InvertRight<white>(capturableEnemy & Pawns_NotLeft());
 
-      //checkmask moved here to use fpawn for faster Ppawn calc: Pawn on P2 can only push - not move
-      fPMovement &= Pawn_Backward<white>(checkMask); 
+    const U64 pMoveUnPin = pMove & ~pins;
+    const U64 bUnPin = brawns & ~pins;
 
-      //These 4 basic moves get pruned with pin information
-      Pawn_PruneMove<white>(fPMovement, pinHV, pinsHV, n);
-      Pawn_PruneMove2<white>(pPMovement, pinHV, pinsHV, n);
-      Pawn_PruneLeft<white>(lPMovement, pinD12, pinsD12, n);
-      Pawn_PruneRight<white>(rPMovement, pinD12, pinsD12, n);
+    const U64 empty = ~occ;
+    const U64 capturableEnemy = BoardFunc::Color<enemy>(brd) & checkMask;
 
-      // Enpassant
-      if (epTarget) {
-        //The eppawn must be an enemy since its only ever valid for a single move
-        const U64 validEPTarget = epTarget & checkMask;
-        U64 epL = pMovementLR & Pawns_NotLeft() & (validEPTarget >> 1); //Pawn that can EPTake to the left
-        U64 epR = pMovementLR & Pawns_NotRight() & (validEPTarget << 1);  //Pawn that can EPTake to the right
+    U64 fPMovement = pMoveHV & BoardFunc::Forward<enemy>(empty);	
+    U64 pPMovement = fPMovement & brd.bitBoards[UnMoved] & BoardFunc::Forward2<enemy>(empty & checkMask);
+    U64 lPMovement = pMoveLR & BoardFunc::AttackRight<enemy>(capturableEnemy & BoardFunc::NotRight());
+    U64 rPMovement = pMoveLR & BoardFunc::AttackLeft<enemy>(capturableEnemy & BoardFunc::NotLeft());
+
+    fPMovement &= BoardFunc::Forward<enemy>(checkMask); 
+
+    PawnPrune<enemy>(fPMovement, pPMovement, lPMovement, rPMovement, masks.pinHV, masks.pinD12, masks.pinMasks);
+
+    // Enpassant
+    if (epTarget) {
+      const U64 validEPTarget = epTarget & checkMask;
+      U64 epL = pMoveLR & BoardFunc::NotLeft() & (validEPTarget << 1);
+      U64 epR = pMoveLR & BoardFunc::NotRight() & (validEPTarget >> 1);
                 
-        //Todo: bench if slower or faster
-        if (epL | epR) {
-          Pawn_PruneLeftEP<white>(epL, pinD12, pinsD12, n);
-          Pawn_PruneRightEP<white>(epR, pinD12, pinsD12, n);
-
-          if (epL & pawns) Callback_Move::template PawnEnpassantTake<white>(brd, epL, epL << 1, Pawn_AttackLeft<white>(epL), moves);
-          if (epL & brawns) Callback_Move::template BrawnEnpassantTake<white>(brd, epL, epL << 1, Pawn_AttackLeft<white>(epL), moves);
-          if (epR & pawns) Callback_Move::template PawnEnpassantTake<white>(brd, epR, epR >> 1, Pawn_AttackRight<white>(epR), moves);
-          if (epR & brawns) Callback_Move::template BrawnEnpassantTake<white>(brd, epR, epR >> 1, Pawn_AttackRight<white>(epR), moves);
-        }
-      }
-
-      //We have pawns that can move on last rank
-      if ((fPMovement | pPMovement | lPMovement | rPMovement) & Pawns_LastRank<white>()) {
-        const U64 pLastRank = pawns & Pawns_LastRank<white>(), bLastRank = brawns & Pawns_LastRank<white>();
-        const U64 pNotLastRank = pawns & ~Pawns_LastRank<white>(), bNotLastRank = brawns & ~Pawns_LastRank<white>();
-
-        U64 proFPawns = fPMovement & pLastRank, proFBrawns = fPMovement & bLastRank; 
-        U64 proPPawns = pPMovement & pLastRank, proPBrawns = pPMovement & bLastRank; 
-        U64 proLPawns = lPMovement & pLastRank, proLBrawns = lPMovement & bLastRank;  
-        U64 proRPawns = rPMovement & pLastRank, proRBrawns = rPMovement & bLastRank; 
-        
-        U64 noProFPawns = fPMovement & pNotLastRank, noProFBrawns = fPMovement & bNotLastRank;
-        U64 noProPPawns = pPMovement & pNotLastRank, noProPBrawns = pPMovement & bNotLastRank;
-        U64 noProLPawns = lPMovement & pNotLastRank, noProLBrawns = lPMovement & bNotLastRank; 
-        U64 noProRPawns = rPMovement & pNotLastRank, noProRBrawns = rPMovement & bNotLastRank;
-
-        while (proFPawns) {const U64 pos = PopBit(proFPawns); Callback_Move::template Pawnpromote<white>(brd, pos, Pawn_Forward<white>(pos), moves);}
-        while (proFBrawns) {const U64 pos = PopBit(proFBrawns); Callback_Move::template Brawnpromote<white>(brd, pos, Pawn_Forward<white>(pos), moves);}
-        while (proPPawns) {const U64 pos = PopBit(proPPawns); Callback_Move::template Pawnpromote<white>(brd, pos, Pawn_Forward2<white>(pos), moves);}
-        while (proPBrawns) {const U64 pos = PopBit(proPBrawns); Callback_Move::template Brawnpromote<white>(brd, pos, Pawn_Forward2<white>(pos), moves);}
-        while (proLPawns) {const U64 pos = PopBit(proLPawns); Callback_Move::template Pawnpromote<white>(brd, pos, Pawn_AttackLeft<white>(pos), moves);}
-        while (proLBrawns) {const U64 pos = PopBit(proLBrawns); Callback_Move::template Brawnpromote<white>(brd, pos, Pawn_AttackLeft<white>(pos), moves);}
-        while (proRPawns) {const U64 pos = PopBit(proRPawns); Callback_Move::template Pawnpromote<white>(brd, pos, Pawn_AttackRight<white>(pos), moves);}
-        while (proRBrawns) {const U64 pos = PopBit(proRBrawns); Callback_Move::template Brawnpromote<white>(brd, pos, Pawn_AttackRight<white>(pos), moves);}
-
-        while (noProFPawns) {const U64 pos = PopBit(noProFPawns); Callback_Move::template Pawnpromote<white>(brd, pos, Pawn_Forward<white>(pos), moves);}
-        while (noProFBrawns) {const U64 pos = PopBit(noProFBrawns); Callback_Move::template Brawnpromote<white>(brd, pos, Pawn_Forward<white>(pos), moves);}
-        while (noProPPawns) {const U64 pos = PopBit(noProPPawns); Callback_Move::template Pawnpromote<white>(brd, pos, Pawn_Forward2<white>(pos), moves);}
-        while (noProPBrawns) {const U64 pos = PopBit(noProPBrawns); Callback_Move::template Brawnpromote<white>(brd, pos, Pawn_Forward2<white>(pos), moves);}
-        while (noProLPawns) {const U64 pos = PopBit(noProLPawns); Callback_Move::template Pawnpromote<white>(brd, pos, Pawn_AttackLeft<white>(pos), moves);}
-        while (noProLBrawns) {const U64 pos = PopBit(noProLBrawns); Callback_Move::template Brawnpromote<white>(brd, pos, Pawn_AttackLeft<white>(pos), moves);}
-        while (noProRPawns) {const U64 pos = PopBit(noProRPawns); Callback_Move::template Pawnpromote<white>(brd, pos, Pawn_AttackRight<white>(pos), moves);}
-        while (noProRBrawns) {const U64 pos = PopBit(noProRBrawns); Callback_Move::template Brawnpromote<white>(brd, pos, Pawn_AttackRight<white>(pos), moves);}
-      } else {
-        U64 fPawns = fPMovement & pawns, fBrawns = fPMovement & brawns;
-        U64 pPawns = pPMovement & pawns, pBrawns = pPMovement & brawns;
-        U64 lPawns = lPMovement & pawns, lBrawns = lPMovement & brawns; 
-        U64 rPawns = rPMovement & pawns, rBrawns = rPMovement & brawns;
-        
-
-        while (fPawns) {const U64 pos = PopBit(fPawns); Callback_Move::template Pawnmove<white>(brd, pos, Pawn_Forward<white>(pos), moves);}
-        while (fBrawns) {const U64 pos = PopBit(fBrawns); Callback_Move::template Brawnmove<white>(brd, pos, Pawn_Forward<white>(pos), moves);}
-        while (pPawns) {const U64 pos = PopBit(pPawns); Callback_Move::template Pawnpush<white>(brd, pos, Pawn_Forward2<white>(pos), moves);}
-        while (pBrawns) {const U64 pos = PopBit(pBrawns); Callback_Move::template Brawnpush<white>(brd, pos, Pawn_Forward2<white>(pos), moves);}
-        while (lPawns) {const U64 pos = PopBit(lPawns); Callback_Move::template Pawnatk<white>(brd, pos, Pawn_AttackLeft<white>(pos), moves);}
-        while (lBrawns) {const U64 pos = PopBit(lBrawns); Callback_Move::template Brawnatk<white>(brd, pos, Pawn_AttackLeft<white>(pos), moves);}
-        while (rPawns) {const U64 pos = PopBit(rPawns); Callback_Move::template Pawnatk<white>(brd, pos, Pawn_AttackRight<white>(pos), moves);}
-        while (rPawns) {const U64 pos = PopBit(rBrawns); Callback_Move::template Brawnatk<white>(brd, pos, Pawn_AttackRight<white>(pos), moves);}
+      if (epL | epR) {
+        PawnPruneEP<enemy>(epL, epR, masks.pinD12, masks.pinMasks);
+        if (epL) {const U8 sq = SquareOf(epL); moves.emplace_back(sq, BoardFunc::AttackLeftSquare<white>(sq), sq - 1, 0, 3, l, t, l, t);}
+        if (epR) {const U8 sq = SquareOf(epR); moves.emplace_back(sq, BoardFunc::AttackRightSquare<white>(sq), sq + 1, 0, 3, l, t, l, t);}
       }
     }
+
+    // We have pawns that can move on last rank
+    constexpr U64 lastRank = BoardFunc::LastRank<white>();
+    if ((fPMovement | pPMovement | lPMovement | rPMovement) & lastRank) {
+      U64 proF = fPMovement & lastRank; 
+      U64 proP = pPMovement & lastRank; 
+      U64 proL = lPMovement & lastRank; 
+      U64 proR = rPMovement & lastRank; 
+
+      U64 noProF = fPMovement ^ proF; 
+      U64 noProP = pPMovement ^ proP;
+      U64 noProL = lPMovement ^ proL;
+      U64 noProR = rPMovement ^ proR;
+
+      constexpr Piece queen = (white) ? WQueen : BQueen;
+      constexpr Piece bishop = (white) ? WBishop : BBishop;
+      constexpr Piece rook = (white) ? WRook : BRook;
+      constexpr Piece knight = (white) ? WKnight : BKnight;
+
+      Bitloop(proF) {
+        const U8 sq = SquareOf(proF); 
+        const U8 to = BoardFunc::ForwardSquare<white>(sq);
+        moves.emplace_back(sq, to, queen, 0, Promo, l, t, l, t);
+        moves.emplace_back(sq, to, bishop, 0, Promo, l, t, l, t);
+        moves.emplace_back(sq, to, rook, 0, Promo, l, t, l, t);
+        moves.emplace_back(sq, to, knight, 0, Promo, l, t, l, t);
+      }
+
+      Bitloop(proP) {
+        const U8 sq = SquareOf(proP);
+        const U8 to = BoardFunc::Forward2Square<white>(sq);
+        moves.emplace_back(sq, to, queen, 0, Promo, l, t, l, t);
+        moves.emplace_back(sq, to, bishop, 0, Promo, l, t, l, t);
+        moves.emplace_back(sq, to, rook, 0, Promo, l, t, l, t);
+        moves.emplace_back(sq, to, knight, 0, Promo, l, t, l, t);
+      }
+
+      Bitloop(proL) {
+        const U8 sq = SquareOf(proL);
+        const U8 to = BoardFunc::AttackLeftSquare<white>(sq);
+        moves.emplace_back(sq, to, queen, 0, PromoCap, l, t, l, t);
+        moves.emplace_back(sq, to, bishop, 0, PromoCap, l, t, l, t);
+        moves.emplace_back(sq, to, rook, 0, PromoCap, l, t, l, t);
+        moves.emplace_back(sq, to, knight, 0, PromoCap, l, t, l, t);
+      }
+
+      Bitloop(proR) {
+        const U8 sq = SquareOf(proR); 
+        const U8 to = BoardFunc::AttackRightSquare<white>(sq);
+        moves.emplace_back(sq, to, queen, 0, PromoCap, l, t, l, t);
+        moves.emplace_back(sq, to, bishop, 0, PromoCap, l, t, l, t);
+        moves.emplace_back(sq, to, rook, 0, PromoCap, l, t, l, t);
+        moves.emplace_back(sq, to, knight, 0, PromoCap, l, t, l, t);
+      }
+
+      Bitloop(noProF) {const U8 sq = SquareOf(noProF); moves.emplace_back(sq, BoardFunc::ForwardSquare<white>(sq), 0, 0, 0, l, t, l, t);}
+      Bitloop(noProP) {const U8 sq = SquareOf(noProP); moves.emplace_back(sq, BoardFunc::Forward2Square<white>(sq), 0, 0, 2, l, t, l, t);}
+      Bitloop(noProL) {const U8 sq = SquareOf(noProL); moves.emplace_back(sq, BoardFunc::AttackLeftSquare<white>(sq), 0, 0, 1, l, t, l, t);}
+      Bitloop(noProR) {const U8 sq = SquareOf(noProR); moves.emplace_back(sq, BoardFunc::AttackRightSquare<white>(sq), 0, 0, 1, l, t, l, t);}
+    } else {
+      Bitloop(fPMovement) {const U8 sq = SquareOf(fPMovement); moves.emplace_back(sq, BoardFunc::ForwardSquare<white>(sq), 0, 0, 0, l, t, l, t);}
+      Bitloop(pPMovement) {const U8 sq = SquareOf(pPMovement); moves.emplace_back(sq, BoardFunc::Forward2Square<white>(sq), 0, 0, 2, l, t, l, t);}
+      Bitloop(lPMovement) {const U8 sq = SquareOf(lPMovement); moves.emplace_back(sq, BoardFunc::AttackLeftSquare<white>(sq), 0, 0, 1, l, t, l, t);}
+      Bitloop(rPMovement) {const U8 sq = SquareOf(rPMovement); moves.emplace_back(sq, BoardFunc::AttackRightSquare<white>(sq), 0, 0, 1, l, t, l, t);}
+    }
+
+    //constexpr int16_t indexDir = (white) ? 1 : -1;
+    //constexpr int16_t pointerDir = (white) ? T : -T;
+    //const U16 toL = l + indexDir;
+    //timelineMoves<white, true, false, false>(turn + pointerDir + 2, l, t, toL, t + 2, 0, pMoveUnPin, moves);
+    //timelineMoves<white, true, false, false>(turn + pointerDir - 2, l, t, toL, t - 2, 0, pMoveUnPin, moves);
+//
+//
+    //Turn *destTurn = turn + pointerDir;
+    //if (destTurn->valid) {
+    //  //Single Push timeline
+    //  U64 move = pMoveUnPin & ~destTurn->board.bitBoards[Occ];
+    //  const U64 pawnPush = move & turn->board.bitBoards[UnMoved];
+    //  move &= destTurn->checkMask;
+//
+    //  Bitloop(move) {
+    //    const U8 sq = SquareOf(move);
+    //    //moves.push_back(Move(sq, sq, 0, 0, 7, l, t, toL, t));
+    //  }
+//
+    //  //Double push timeline
+    //  Turn *destTurn2 = destTurn + pointerDir;
+    //  if (destTurn->valid) {
+    //    U64 move = pawnPush & ~destTurn2->board.bitBoards[Occ] & destTurn2->checkMask;
+    //    Bitloop(move) {
+    //      const U8 sq = SquareOf(move);
+    //      //moves.push_back(Move(sq, sq, 0, 0, 7, l, t, l + (T << 1), t));
+    //    }
+    //  }
+//
+    //  const U64 movable = BoardFunc::Color<!white>(destTurn->board) & destTurn->checkMask;
+//
+    //  U64 lBrawns = ((movable & BoardFunc::NotRight()) << 1) & bUnPin;
+    //  U64 rBrawns = ((movable & BoardFunc::NotLeft()) >> 1) & bUnPin;
+    //  const U64 fBrawns = BoardFunc::Forward<enemy>(movable) & bUnPin;
+    //  U64 fPromo = fBrawns & BoardFunc::LastRank<white>();
+    //  U64 fNoPromo = fBrawns ^ fPromo;
+//
+    //  Bitloop(lBrawns) {
+    //    const U8 sq = SquareOf(lBrawns);
+    //    //moves.push_back(Move(sq, sq - 1, 0, 0, 8, l, t, toL, t));
+    //  }
+//
+    //  Bitloop(rBrawns) {
+    //    const U8 sq = SquareOf(rBrawns);
+    //    //moves.push_back(Move(sq, sq + 1, 0, 0, 8, l, t, toL, t));
+    //  }
+//
+    //  Bitloop(fNoPromo) {
+    //    const U8 sq = SquareOf(fNoPromo);
+    //    //moves.push_back(Move(sq, BoardFunc::ForwardSquare<white>(sq), 0, 0, 8, l, t, toL, t));
+    //  }
+//
+    //  constexpr Piece queen = (white) ? WQueen : BQueen;
+    //  constexpr Piece bishop = (white) ? WBishop : BBishop;
+    //  constexpr Piece rook = (white) ? WRook : BRook;
+    //  constexpr Piece knight = (white) ? WKnight : BKnight;
+//
+    //  Bitloop(fPromo) {
+    //    //moves.push_back(Move(sq, BoardFunc::ForwardSquare<white>(sq), queen, 0, 8, l, t, toL, t));
+    //    //moves.push_back(Move(sq, BoardFunc::ForwardSquare<white>(sq), bishop, 0, 8, l, t, toL, t));
+    //    //moves.push_back(Move(sq, BoardFunc::ForwardSquare<white>(sq), rook, 0, 8, l, t, toL, t));
+    //    //moves.push_back(Move(sq, BoardFunc::ForwardSquare<white>(sq), knight, 0, 8, l, t, toL, t));
+    //  }
+    //}
+//
+    //Turn *destTurnB = turn - 2;
+    //if (destTurnB->valid) {
+    //  const U16 toT = t - 2;
+    //  const U64 fBrawns = BoardFunc::Forward<enemy>(BoardFunc::Color<!white>(destTurn->board) & destTurn->checkMask) & bUnPin;
+    //  U64 fPromo = fBrawns & BoardFunc::LastRank<white>();
+    //  U64 fNoPromo = fBrawns ^ fPromo;
+//
+    //  Bitloop(fNoPromo) {
+    //    const U8 sq = SquareOf(fNoPromo);
+    //    //moves.push_back(Move(sq, BoardFunc::ForwardSquare<white>(sq), 0, 0, 8, l, t, l, toT));
+    //  }
+//
+    //  constexpr Piece queen = (white) ? WQueen : BQueen;
+    //  constexpr Piece bishop = (white) ? WBishop : BBishop;
+    //  constexpr Piece rook = (white) ? WRook : BRook;
+    //  constexpr Piece knight = (white) ? WKnight : BKnight;
+//
+    //  Bitloop(fPromo) {
+    //    //moves.push_back(Move(sq, BoardFunc::ForwardSquare<white>(sq), queen, 0, 8, l, t, l, toT));
+    //    //moves.push_back(Move(sq, BoardFunc::ForwardSquare<white>(sq), bishop, 0, 8, l, t, l, toT));
+    //    //moves.push_back(Move(sq, BoardFunc::ForwardSquare<white>(sq), rook, 0, 8, l, t, l, toT));
+    //    //moves.push_back(Move(sq, BoardFunc::ForwardSquare<white>(sq), knight, 0, 8, l, t, l, toT));
+    //  }
+    //}
 
     // Knight moves
-    {
-      U64 knights = Knights<white>(brd) & ~(pinHV | pinD12);
+    U64 knights = BoardFunc::PieceBB<white, KnightType>(brd) & ~pins;
+    if (knights) {
+      const U8 sq = SquareOf(knights);
+      const U64 bit = 1ull << sq;
+
+      //Spatial
+      U64 move = Lookup::Knight(sq) & movable;
+      U64 cap = move & occ;
+      U64 nocap = move ^ cap;
+
+      Bitloop(cap) moves.emplace_back(sq, SquareOf(cap), 0, 0, 1, l, t, l, t);
+      Bitloop(nocap) moves.emplace_back(sq, SquareOf(nocap), 0, 0, 0, l, t, l, t);
+
+      //timelineMoves<white, true, false, true>(turn + T + 4, l, t, l + 1, t + 4, 0, knights, moves);
+      //timelineMoves<white, true, false, true>(turn + T - 4, l, t, l + 1, t - 4, 0, knights, moves);
+      //timelineMoves<white, true, false, true>(turn - T + 4, l, t, l - 1, t + 4, 0, knights, moves);
+      //timelineMoves<white, true, false, true>(turn - T - 4, l, t, l - 1, t - 4, 0, knights, moves);
+      //timelineMoves<white, true, false, true>(turn + T2 + 4, l, t, l + 2, t + 2, 0, knights, moves);
+      //timelineMoves<white, true, false, true>(turn + T2 - 4, l, t, l + 2, t - 2, 0, knights, moves);
+      //timelineMoves<white, true, false, true>(turn - T2 + 4, l, t, l - 2, t + 2, 0, knights, moves);
+      //timelineMoves<white, true, false, true>(turn - T2 - 4, l, t, l - 2, t - 2, 0, knights, moves);
+
+      //U64 knight1 = Lookup::Knight1(sq);
+      //U64 knight2 = Lookup::Knight2(sq);
+      //timelineMoves<white, false, false, true>(turn - 2, sq, l, t, l, t - 2, knight1, moves);
+      //timelineMoves<white, false, false, true>(turn - 4, sq, l, t, l, t - 4, knight2, moves);
+      //timelineMoves<white, false, false, true>(turn + T, sq, l, t, l + 1, t, knight1, moves);
+      //timelineMoves<white, false, false, true>(turn + T2, sq, l, t, l + 2, t, knight2, moves);
+      //timelineMoves<white, false, false, true>(turn - T, sq, l, t, l - 1, t, knight1, moves);
+      //timelineMoves<white, false, false, true>(turn - T2, sq, l, t, l - 2, t, knight2, moves);
+
+      knights ^= bit;
       Bitloop(knights) {
         const U64 sq = SquareOf(knights);
-        U64 move = Lookup::Knight(sq) & movableSquare;
+        const U64 move = Lookup::Knight(sq) & movable;
+        U64 cap = move & occ;
+        U64 nocap = move ^ cap;
 
-        while (move) { 
-          const U64 to = PopBit(move); 
-          Callback_Move::template Knightmove<white>(brd, 1ull << sq, to, moves); 
-        }
+        Bitloop(cap) moves.emplace_back(sq, SquareOf(cap), 0, 0, 1, l, t, l, t);
+        Bitloop(nocap) moves.emplace_back(sq, SquareOf(nocap), 0, 0, 0, l, t, l, t);
+
+        //U64 knight1 = Lookup::Knight1(sq);
+        //U64 knight2 = Lookup::Knight2(sq);
+        //timelineMoves<white, false, false, true>(turn - 2, sq, l, t, l, t - 2, knight1, moves);
+        //timelineMoves<white, false, false, true>(turn - 4, sq, l, t, l, t - 4, knight2, moves);
+        //timelineMoves<white, false, false, true>(turn + T, sq, l, t, l + 1, t, knight1, moves);
+        //timelineMoves<white, false, false, true>(turn + T2, sq, l, t, l + 2, t, knight2, moves);
+        //timelineMoves<white, false, false, true>(turn - T, sq, l, t, l - 1, t, knight1, moves);
+        //timelineMoves<white, false, false, true>(turn - T2, sq, l, t, l - 2, t, knight2, moves);
       }
     }
 
-    // Bishop moves
-    {
-      const U64 bishops = Bishops<white>(brd) & ~pinHV & ~doublePin;
+    if constexpr (state.Bishook)  pinnablePiece<white, BishopType, T>(turn, occ, BoardFunc::PieceBB<white, BishopType>(brd) & notPinHV & notDoublePin, pins, movable, masks.pinMasks, l, t, moves);
+    if constexpr (state.Bishook)  pinnablePiece<white, RookType  , T>(turn, occ, BoardFunc::PieceBB<white, RookType>(brd) & notPinD12 & notDoublePin, pins, movable, masks.pinMasks, l, t, moves);
+    if constexpr (state.Princess) pinnablePiece<white, QueenType , T>(turn, occ, BoardFunc::PieceBB<white, PrincessType>(brd) & notDoublePin, pins, movable, masks.pinMasks, l, t, moves);
+                                  pinnablePiece<white, QueenType , T>(turn, occ, BoardFunc::PieceBB<white, QueenType>(brd) & notDoublePin, pins, movable, masks.pinMasks, l, t, moves);
+    if constexpr (state.CKing)    pinnablePiece<white, KingType  , T>(turn, occ, BoardFunc::PieceBB<white, CKingType>(brd) & notDoublePin, pins, movable, masks.pinMasks, l, t, moves);
 
-      U64 pinBishops = bishops & pinD12, nopinBishops = bishops ^ pinBishops;
-      for (int i = 0; i < n; i++) {
-        U64 pBishops = pinBishops & pinsD12[i];
-        Bitloop(pBishops) {
-          const U64 sq = SquareOf(pBishops);
-          U64 move = Lookup::Bishop(sq, brd.Occ) & movableSquare & pinsD12[i];
-          while (move) { 
-            const U64 to = PopBit(move); 
-            Callback_Move::template Bishopmove<white>(brd, 1ull << sq, to, moves); 
-          } 
-        }
-      }
-      
-      Bitloop(nopinBishops) {
-        const U64 sq = SquareOf(nopinBishops);
-        U64 move = Lookup::Bishop(sq, brd.Occ) & movableSquare;
-
-        while (move) { 
-          const U64 to = PopBit(move); 
-          Callback_Move::template Bishopmove<white>(brd, 1ull << sq, to, moves); 
-        }
-      }
-    }
-
-    // Rook moves
-    {
-      const U64 rooks = Rooks<white>(brd) & ~pinD12 & ~doublePin;
-
-      U64 pinRooks = rooks & pinHV, nopinRooks = rooks ^ pinRooks;
-      for (int i = 0; i < n; i++) {
-        U64 pRooks = pinRooks & pinsHV[i];
-        Bitloop(pRooks) {
-          const U64 sq = SquareOf(pRooks);
-          U64 move = Lookup::Rook(sq, brd.Occ) & movableSquare & pinsHV[i];
-
-          while (move) { 
-            const U64 to = PopBit(move); 
-            Callback_Move::template Rookmove<white>(brd, 1ull << sq, to, moves); 
-          } 
-        }
-      }
-      
-      Bitloop(nopinRooks) {
-        const U64 sq = SquareOf(nopinRooks);
-        U64 move = Lookup::Rook(sq, brd.Occ) & movableSquare;
-
-        while (move) { 
-          const U64 to = PopBit(move); 
-          Callback_Move::template Rookmove<white>(brd, 1ull << sq, to, moves); 
-        } 
-      }
-    }
-
-    // Princess moves
-    {
-      const U64 princesses = Princesses<white>(brd) & ~doublePin;
-      U64 pinD12Princesses = princesses & pinD12;
-      U64 pinHVPrincesses = princesses & pinHV;
-      U64 nopinPrincesses = princesses ^ (pinD12Princesses | pinHVPrincesses);
-      for (int i = 0; i < n; i++) {
-        U64 D12Princesses = pinD12Princesses & pinsD12[i];
-        Bitloop(D12Princesses) {
-          const U64 sq = SquareOf(D12Princesses);
-          U64 move = Lookup::Bishop(sq, brd.Occ) & movableSquare & pinsD12[i];
-
-          while (move) { 
-            const U64 to = PopBit(move); 
-            Callback_Move::template Princessmove<white>(brd, 1ull << sq, to, moves); 
-          }
-        }
-        U64 HVPrincesses = pinHVPrincesses & pinsHV[i];
-        Bitloop(HVPrincesses) {
-          const U64 sq = SquareOf(HVPrincesses);
-          U64 move = Lookup::Rook(sq, brd.Occ) & movableSquare & pinsHV[i];
-
-          while (move) { 
-            const U64 to = PopBit(move); 
-            Callback_Move::template Princessmove<white>(brd, 1ull << sq, to, moves); 
-          }
-        }
-      }
-      Bitloop(nopinPrincesses) {
-        const U64 sq = SquareOf(nopinPrincesses);
-        U64 move = Lookup::Queen(sq, brd.Occ) & movableSquare;
-
-        while (move) { 
-          const U64 to = PopBit(move); 
-          Callback_Move::template Princessmove<white>(brd, 1ull << sq, to, moves); 
-        }
-      }
-    }
-
-    // Queen moves
-    {
-      const U64 queens = Queens<white>(brd) & ~doublePin;
-      U64 pinD12Queens = queens & pinD12;
-      U64 pinHVQueens = queens & pinHV;
-      U64 nopinQueens = queens ^ (pinD12Queens | pinHVQueens);
-      for (int i = 0; i < n; i++) {
-        U64 D12Queens = pinD12Queens & pinsD12[i];
-        Bitloop(D12Queens) {
-          const U64 sq = SquareOf(D12Queens);
-          U64 move = Lookup::Bishop(sq, brd.Occ) & movableSquare & pinsD12[i];
-
-          while (move) { 
-            const U64 to = PopBit(move); 
-            Callback_Move::template Queenmove<white>(brd, 1ull << sq, to, moves); 
-          }
-        }
-        U64 HVQueens = pinHVQueens & pinsHV[i];
-        Bitloop(HVQueens) {
-          const U64 sq = SquareOf(HVQueens);
-          U64 move = Lookup::Rook(sq, brd.Occ) & movableSquare & pinsHV[i];
-
-          while (move) { 
-            const U64 to = PopBit(move); 
-            Callback_Move::template Queenmove<white>(brd, 1ull << sq, to, moves); 
-          }
-        }
-      }
-      Bitloop(nopinQueens) {
-        const U64 sq = SquareOf(nopinQueens);
-        U64 move = Lookup::Queen(sq, brd.Occ) & movableSquare;
-
-        while (move) { 
-          const U64 to = PopBit(move); 
-          Callback_Move::template Queenmove<white>(brd, 1ull << sq, to, moves); 
-        }
-      }
-    }
-    
-
-    // Common King moves
-    {
-      const U64 commonKings = CommonKings<white>(brd) & ~doublePin;
-      U64 pinD12CKings = commonKings & pinD12;
-      U64 pinHVCKings = commonKings & pinHV;
-      U64 nopinCKings = commonKings ^ (pinD12CKings | pinHVCKings);
-      for (int i = 0; i < n; i++) {
-        U64 D12CKIngs = pinD12CKings & pinsD12[i];
-        Bitloop(D12CKIngs) {
-          const U64 sq = SquareOf(D12CKIngs);
-          U64 move = Lookup::King(sq) & movableSquare & pinsD12[i];
-
-          while (move) { 
-            const U64 to = PopBit(move); 
-            Callback_Move::template CommonKingmove<white>(brd, 1ull << sq, to, moves); 
-          }
-        }
-        U64 HVCKings = pinHVCKings & pinsHV[i];
-        Bitloop(HVCKings) {
-          const U64 sq = SquareOf(HVCKings);
-          U64 move = Lookup::King(sq) & movableSquare & pinsHV[i];
-
-          while (move) { 
-            const U64 to = PopBit(move); 
-            Callback_Move::template CommonKingmove<white>(brd, 1ull << sq, to, moves); 
-          }
-        }
-      }
-      Bitloop(nopinCKings) {
-        const U64 sq = SquareOf(nopinCKings);
-        U64 move = Lookup::King(sq) & movableSquare;
-
-        while (move) { 
-          const U64 to = PopBit(move); 
-          Callback_Move::template CommonKingmove<white>(brd, 1ull << sq, to, moves); 
-        }
-      }
-    }
+    //if constexpr (true) {
+    //  U64 unicorns = BoardFunc::PieceBB<white, UnicornType>(brd) & ~pins;
+    //  Bitloop(unicorns) {
+    //    const U64 sq = SquareOf(unicorns);
+    //    buildRingMoves<white, true, false, BishopType, North, T>(turn, l, t, 0, sq, 0, moves);
+    //    buildRingMoves<white, true, false, BishopType, West, T>(turn, l, t, 0, sq, 0, moves);
+    //    buildRingMoves<white, true, false, BishopType, South, T>(turn, l, t, 0, sq, 0, moves);
+    //    buildRingMoves<white, true, false, RookType, NorthEast, T>(turn, l, t, 0, sq, 0, moves);
+    //    buildRingMoves<white, true, false, RookType, SouthEast, T>(turn, l, t, 0, sq, 0, moves);
+    //    buildRingMoves<white, true, false, RookType, SouthWest, T>(turn, l, t, 0, sq, 0, moves);
+    //    buildRingMoves<white, true, false, RookType, NorthWest, T>(turn, l, t, 0, sq, 0, moves);
+    //  }
+//
+    //  U64 dragons = BoardFunc::PieceBB<white, DragonType>(brd) & ~pins;
+    //  Bitloop(dragons) {
+    //    const U64 sq = SquareOf(dragons);
+    //    buildRingMoves<white, true, false, BishopType, NorthEast, T>(turn, l, t, 0, sq, 0, moves);
+    //    buildRingMoves<white, true, false, BishopType, SouthEast, T>(turn, l, t, 0, sq, 0, moves);
+    //    buildRingMoves<white, true, false, BishopType, SouthWest, T>(turn, l, t, 0, sq, 0, moves);
+    //    buildRingMoves<white, true, false, BishopType, NorthWest, T>(turn, l, t, 0, sq, 0, moves);
+    //  }
+    //}
+     
   }
 
-  template<bool IsWhite, class Callback_Move>
-  _Compiletime void EnumerateMoves(Turn &turn, std::vector<Move> &moves) {
-    constexpr bool white = IsWhite; 
-
-    U64 pastMask = BoardMask::PastCheckMask<white>(*turn.boardMask, *turn.board);
-    if ((pastMask & (pastMask - 1)) != 0) {return;}
+  template<BoardState state, U8 T>
+  _Compiletime void EnumerateMoves(Turn *turn, const int l, const int t, std::vector<Move> &moves) {
+    constexpr bool white = state.WhiteMove;
+    const Board &brd = turn->board;
+    //U64 pastMask = BoardFunc::PastCheck<white>(turn->boardMask, brd);
+    U64 pastMask = 0;
+    if ((pastMask & (pastMask - 1)) != 0) return;
     pastMask |= -(pastMask == 0);
 
-    U64 pinD12 = 0, pinHV = 0, doublePin = 0;
-    U64 checkMasks[65], pinsD12[64], pinsHV[64];
-    checkMasks[0] = 0xffffffffffffffffull;
-    Refresh<white>(turn, pinD12, pinHV, doublePin, checkMasks, pinsD12, pinsHV);
+    Masks masks;
+    masks.checkMasks[0] = 0xffffffffffffffffull;
+    Refresh<state>(turn, masks);
 
-    const U64 checkMask = turn.checkMask & pastMask;
+    const U64 checkMask = turn->checkMask & pastMask;
     if (checkMask != 0) {
-      _enumerate<white, Callback_Move>(turn, pinD12, pinHV, doublePin, checkMask, pastMask, checkMasks, pinsD12, pinsHV, moves);
+      _enumerate<state, T>(turn, turn->epTarget, checkMask, pastMask, masks, l, t, moves);
     } else {
-      const Board brd = *turn.board;
-      int n = 0;
-      const U64 movable = EnemyOrEmpty<white>(brd) & ~turn.banMask & pastMask;
-      // Royal queen moves
-      {
-        U64 royalQueens = RoyalQueens<white>(brd);
-        Bitloop (royalQueens) {
-          const U64 sq = SquareOf(royalQueens);
-          U64 move = Lookup::Queen(sq, brd.Occ) & movable & checkMasks[n];
-          while (move) {
-            Callback_Move::template RoyalQueenmove<white>(brd, 1ull << sq, PopBit(move), moves);
-          }
-          n++;
-        }
-      }
-      
-      // King moves
-      {
-        U64 kings = Kings<white>(brd);
-        Bitloop (kings) {
-          const U64 sq = SquareOf(kings);
-          U64 move = Lookup::King(sq) & movable & checkMasks[n];
-          while (move) {
-            Callback_Move::template Kingmove<white>(brd, 1ull << sq, PopBit(move), moves);
-          }
-          n++;
-        }
-      }
+      U8 n = 0;
+      const U64 occ = brd.bitBoards[Occ];
+      const U64 movable = BoardFunc::EnemyOrEmpty<white>(brd) & ~masks.banMask & pastMask;
+      if constexpr (state.RQueen) royaltyPiece<white, QueenType, T>(turn, occ, BoardFunc::PieceBB<white, RQueenType>(brd), movable, masks.checkMasks, n, l, t, moves);
+      royaltyPiece<white, KingType, T>(turn, occ, BoardFunc::PieceBB<white, KingType>(brd), movable, masks.checkMasks, n, l, t, moves);
     }
-  }
-};
-
-class MoveReciever {
-  public:
-
-  #define ENABLEPRINT 0
-  #define IFPRN if constexpr (ENABLEPRINT) 
-
-  template<bool IsWhite>
-  _Compiletime void Pawnmove(const Board& brd, const U64 from, const U64 to, std::vector<Move> &moves) {
-    const Board next = Board::Move<Piece::Pawn, IsWhite, false>(brd, from, to);
-    IFPRN std::cout << "Pawnmove:\n" << printBoard(next); 
-
-    moves.push_back(Move(next, 0, 0, 0, 0, 0, 0)); 
-  }
-
-  template<bool IsWhite>
-  _Compiletime void Pawnpush(const Board& brd, const U64 from, const U64 to, std::vector<Move> &moves) {
-    const Board next = Board::Move<Piece::Pawn, IsWhite, false>(brd, from, to);
-    IFPRN std::cout << "Pawnpush:\n" << printBoard(next); 
-
-    moves.push_back(Move(next, to, 0, 0, 0, 0, 0));  
-  }
-
-  template<bool IsWhite>
-  _Compiletime void Pawnatk(const Board& brd, const U64 from, const U64 to, std::vector<Move> &moves) {
-    const Board next = Board::Move<Piece::Pawn, IsWhite, true>(brd, from, to);
-    IFPRN std::cout << "Pawntake:\n" << printBoard(next); 
-
-    moves.push_back(Move(next, 0, 0, 0, 0, 0, 0));
-  }
-
-  template<bool IsWhite>
-  _Compiletime void PawnEnpassantTake(const Board& brd, const U64 from, const U64 enemy, const U64 to, std::vector<Move> &moves) {
-    const Board next = Board::MoveEP<IsWhite, true>(brd, from, enemy, to);
-    IFPRN std::cout << "PawnEnpassantTake:\n" << printBoard(next); 
-
-    moves.push_back(Move(next, 0, 0, 0, 0, 0, 0));
-  }
-
-  template<bool IsWhite>
-  _Compiletime void Pawnpromote(const Board& brd, const U64 from, const U64 to, std::vector<Move> &moves) {
-    const Board next1 = Board::MovePromote<Piece::Queen, IsWhite, true>(brd, from, to);
-    const Board next2 = Board::MovePromote<Piece::Knight, IsWhite, true>(brd, from, to);
-    const Board next3 = Board::MovePromote<Piece::Bishop, IsWhite, true>(brd, from, to);
-    const Board next4 = Board::MovePromote<Piece::Rook, IsWhite, true>(brd, from, to);
-    IFPRN std::cout << "Pawnpromote:\n" << printBoard(next1) << printBoard(next2) << printBoard(next3) << printBoard(next4); 
-
-    moves.push_back(Move(next1, 0, 0, 0, 0, 0, 0));
-    moves.push_back(Move(next2, 0, 0, 0, 0, 0, 0));
-    moves.push_back(Move(next3, 0, 0, 0, 0, 0, 0));
-    moves.push_back(Move(next4, 0, 0, 0, 0, 0, 0));
-  }
-
-  template<bool IsWhite>
-  _Compiletime void Brawnmove(const Board& brd, const U64 from, const U64 to, std::vector<Move> &moves) {
-    const Board next = Board::Move<Piece::Pawn, IsWhite, false>(brd, from, to);
-    IFPRN std::cout << "Brawnmove:\n" << printBoard(next); 
-
-    moves.push_back(Move(next, 0, 0, 0, 0, 0, 0));
-  }
-
-  template<bool IsWhite>
-  _Compiletime void Brawnpush(const Board& brd, const U64 from, const U64 to, std::vector<Move> &moves) {
-    const Board next = Board::Move<Piece::Pawn, IsWhite, false>(brd, from, to);
-    IFPRN std::cout << "Brawnpush:\n" << printBoard(next); 
-
-    moves.push_back(Move(next, to, 0, 0, 0, 0, 0));
-  }
-
-  template<bool IsWhite>
-  _Compiletime void Brawnatk(const Board& brd, const U64 from, const U64 to, std::vector<Move> &moves) {
-    const Board next = Board::Move<Piece::Pawn, IsWhite, true>(brd, from, to);
-    IFPRN std::cout << "Brawntake:\n" << printBoard(next); 
-
-    moves.push_back(Move(next, 0, 0, 0, 0, 0, 0));  
-  }
-
-  template<bool IsWhite>
-  _Compiletime void BrawnEnpassantTake(const Board& brd, const U64 from, const U64 enemy, const U64 to, std::vector<Move> &moves) {
-    const Board next = Board::MoveEP<IsWhite, true>(brd, from, enemy, to);
-    IFPRN std::cout << "BrawnEnpassantTake:\n" << printBoard(next); 
-
-    moves.push_back(Move(next, 0, 0, 0, 0, 0, 0)); 
-  }
-
-  template<bool IsWhite>
-  _Compiletime void Brawnpromote(const Board& brd, const U64 from, const U64 to, std::vector<Move> &moves) {
-    const Board next1 = Board::MovePromote<Piece::Queen, IsWhite, true>(brd, from, to);
-    const Board next2 = Board::MovePromote<Piece::Knight, IsWhite, true>(brd, from, to);
-    const Board next3 = Board::MovePromote<Piece::Bishop, IsWhite, true>(brd, from, to);
-    const Board next4 = Board::MovePromote<Piece::Rook, IsWhite, true>(brd, from, to);
-    IFPRN std::cout << "Pawnpromote:\n" << printBoard(next1) << printBoard(next2) << printBoard(next3) << printBoard(next4); 
-
-
-    moves.push_back(Move(next1, 0, 0, 0, 0, 0, 0));
-    moves.push_back(Move(next2, 0, 0, 0, 0, 0, 0));
-    moves.push_back(Move(next3, 0, 0, 0, 0, 0, 0));
-    moves.push_back(Move(next4, 0, 0, 0, 0, 0, 0));
-  }
-
-  template<bool IsWhite>
-  _Compiletime void Knightmove(const Board& brd, const U64 from, const U64 to, std::vector<Move> &moves) {
-    const Board next = Board::Move <Piece::Knight, IsWhite>(brd, from, to, to & Color<!IsWhite>(brd));
-    IFPRN std::cout << "Knightmove:\n" << printBoard(next); 
-
-    moves.push_back(Move(next, 0, 0, 0, 0, 0, 0));
-  }
-
-  template<bool IsWhite>
-  _Compiletime void Bishopmove(const Board& brd, const U64 from, const U64 to, std::vector<Move> &moves) {
-    const Board next = Board::Move<Piece::Bishop, IsWhite>(brd, from, to, to & Color<!IsWhite>(brd));
-    IFPRN std::cout << "Bishopmove:\n" << printBoard(next);
-
-    moves.push_back(Move(next, 0, 0, 0, 0, 0, 0));
-  }
-
-  template<bool IsWhite>
-  _Compiletime void Rookmove(const Board& brd, const U64 from, const U64 to, std::vector<Move> &moves) {
-    const Board next = Board::Move<Piece::Rook, IsWhite>(brd, from, to, to & Color<!IsWhite>(brd));
-    IFPRN std::cout << "Rookmove:\n" << printBoard(next); 
-
-    moves.push_back(Move(next, 0, 0, 0, 0, 0, 0));  
-  }
-
-  template<bool IsWhite>
-  _Compiletime void Princessmove(const Board& brd, const U64 from, const U64 to, std::vector<Move> &moves) {
-    const Board next = Board::Move<Piece::Princess, IsWhite>(brd, from, to, to & Color<!IsWhite>(brd));
-    IFPRN std::cout << "Princessmove:\n" << printBoard(next); 
-
-    moves.push_back(Move(next, 0, 0, 0, 0, 0, 0));
-  }
-
-  template<bool IsWhite>
-  _Compiletime void Unicornmove(const Board& brd, const U64 from, const U64 to, std::vector<Move> &moves) {
-    const Board next = Board::Move<Piece::Unicorn, IsWhite>(brd, from, to, to & Color<!IsWhite>(brd));
-    IFPRN std::cout << "Unicornmove:\n" << printBoard(next); 
-
-    moves.push_back(Move(next, 0, 0, 0, 0, 0, 0));  
-  }
-
-  template<bool IsWhite>
-  _Compiletime void Dragonmove(const Board& brd, const U64 from, const U64 to, std::vector<Move> &moves) {
-    const Board next = Board::Move<Piece::Dragon, IsWhite>(brd, from, to, to & Color<!IsWhite>(brd));
-    IFPRN std::cout << "Dragonmove:\n" << printBoard(next); 
-
-    moves.push_back(Move(next, 0, 0, 0, 0, 0, 0));
-  }
-
-  template<bool IsWhite>
-  _Compiletime void Queenmove(const Board& brd, const U64 from, const U64 to, std::vector<Move> &moves) {
-    const Board next = Board::Move<Piece::Queen, IsWhite>(brd, from, to, to & Color<!IsWhite>(brd));
-    IFPRN std::cout << "Queenmove:\n" << printBoard(next); 
-
-    moves.push_back(Move(next, 0, 0, 0, 0, 0, 0));
-  }
-
-  template<bool IsWhite>
-  _Compiletime void RoyalQueenmove(const Board& brd, const U64 from, const U64 to, std::vector<Move> &moves) {
-    const Board next = Board::Move<Piece::RQueen, IsWhite>(brd, from, to, to & Color<!IsWhite>(brd));
-    IFPRN std::cout << "RoyalQueenmove:\n" << printBoard(next); 
-
-    moves.push_back(Move(next, 0, 0, 0, 0, 0, 0));
-  }
-
-  template<bool IsWhite>
-  _Compiletime void CommonKingmove(const Board& brd, const U64 from, const U64 to, std::vector<Move> &moves) {
-    const Board next = Board::Move<Piece::CKing, IsWhite>(brd, from, to, to & Color<!IsWhite>(brd));
-    IFPRN std::cout << "CommonKingmove:\n" << printBoard(next); 
-
-    moves.push_back(Move(next, 0, 0, 0, 0, 0, 0)); 
-  }
-
-  template<bool IsWhite>
-  _Compiletime void Kingmove(const Board& brd, const U64 from, const U64 to, std::vector<Move> &moves) {
-    const Board next = Board::Move<Piece::King, IsWhite>(brd, from, to, to & Color<!IsWhite>(brd));
-    IFPRN std::cout << "Kingmove:\n" << printBoard(next); 
-
-    moves.push_back(Move(next, 0, 0, 0, 0, 0, 0)); 
-  }
-
-  template<bool IsWhite>
-  _Compiletime void KingCastle(const Board& brd, const U64 kingswitch, const U64 rookswitch, std::vector<Move> &moves) {
-    const Board next = Board::MoveCastle<IsWhite>(brd, kingswitch, rookswitch);
-    IFPRN std::cout << "KingCastle:\n" << printBoard(next);
-
-    moves.push_back(Move(next, 0, 0, 0, 0, 0, 0)); 
   }
 };
